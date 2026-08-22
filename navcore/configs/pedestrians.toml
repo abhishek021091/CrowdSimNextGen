@@ -1,0 +1,18 @@
+# =======================================================
+# Pedestrian Configuration File
+#=======================================================
+
+
+[physical]
+radius = 0.3
+
+[kinematics]
+v_pref = 1
+chassis = "holonomic"
+
+[policy]
+policy = "ORCA"
+
+[Randomization]
+randomize_pedestrian_radius = true
+randomize_pedestrian_v_pref = true

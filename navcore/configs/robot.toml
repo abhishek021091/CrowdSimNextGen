@@ -1,0 +1,18 @@
+#======================================================
+#Robots Configuration File
+#=======================================================
+
+[physical]
+radius = 0.3
+observable = false
+
+[kinematics]
+v_pref = 1
+chassis = "holonomic"
+
+[policy]
+policy = "ORCA"
+
+[sensors]
+sensor_range = 5.0
+sensor_fov = 360.0

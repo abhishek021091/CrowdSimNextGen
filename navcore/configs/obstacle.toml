@@ -1,0 +1,12 @@
+#==========================================================================
+# Obstacle Configuration file
+#==========================================================================
+
+[boundary]
+boundary = true
+boundary_thickness = 0.1
+
+[pillar]
+pillar = true
+pillar_radius = 0.2
+num_pillars = 0
