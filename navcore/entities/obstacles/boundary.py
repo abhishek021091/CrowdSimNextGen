@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from navcore.entities.components.geometry import Polygon, Vector2
+from navcore.entities.components.geometry.polygon import Polygon
+from navcore.entities.components.geometry.vector2 import Vector2
 
 from .obstacle import Obstacle
 

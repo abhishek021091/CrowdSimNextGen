@@ -15,16 +15,12 @@ handled by a separate module.
 
 from .boundary import Boundary, BoundaryGate
 from .obstacle import Obstacle
-from .pillar import Pillar
 from .table import Table, TableShape
-from .wall import Wall
 
 __all__ = [
     "Boundary",
     "BoundaryGate",
     "Obstacle",
-    "Pillar",
     "Table",
     "TableShape",
-    "Wall",
 ]

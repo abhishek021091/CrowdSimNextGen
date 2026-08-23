@@ -19,7 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from navcore.entities.components.geometry import Geometry, Rectangle, Vector2
+from navcore.entities.components.geometry.geometry import Geometry
+from navcore.entities.components.geometry.rectangle import Rectangle
+from navcore.entities.components.geometry.vector2 import Vector2
 
 
 @dataclass(slots=True, frozen=True)

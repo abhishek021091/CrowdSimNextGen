@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from pathlib import Path
+import tomllib
+import navcore.configs
 
 from navcore.entities.components.geometry.geometry import Geometry, Vector2
 
@@ -16,6 +19,7 @@ class Rectangle(Geometry):
         height: Full extent along the local y-axis. Must be strictly positive.
     """
 
+    center: Vector2
     width: float
     height: float
 
@@ -25,6 +29,36 @@ class Rectangle(Geometry):
         Raises:
             ValueError: If ``width`` or ``height`` is not strictly positive.
         """
+        assert navcore.configs.__file__ is not None
+        env_path = Path(navcore.configs.__file__).parent / "env.toml"
+        with open(Path(env_path), "rb") as f:
+            env = tomllib.load(f)
+
+        if (
+            env["arenaSize"]["width"] <= self.center[0]
+            or -env["arenaSize"]["width"] >= self.center[0]
+        ):
+            raise ValueError(
+                f"Rectangle center x-coordinate is out of bounds, got {self.center[0]}."
+            )
+        if (
+            env["arenaSize"]["height"] <= self.center[1]
+            or -env["arenaSize"]["height"] >= self.center[1]
+        ):
+            raise ValueError(
+                f"Rectangle center y-coordinate is out of bounds, got {self.center[1]}."
+            )
+        if (
+            env["arenaSize"]["width"] <= self.width / 2.0
+            or -env["arenaSize"]["width"] >= self.width / 2.0
+        ):
+            raise ValueError(f"Rectangle width is out of bounds, got {self.width!r}.")
+        if (
+            env["arenaSize"]["height"] <= self.height / 2.0
+            or -env["arenaSize"]["height"] >= self.height / 2.0
+        ):
+            raise ValueError(f"Rectangle height is out of bounds, got {self.height!r}.")
+
         if self.width <= 0.0 or self.height <= 0.0:
             raise ValueError(
                 "Rectangle width and height must be positive, "
@@ -47,7 +81,7 @@ class Rectangle(Geometry):
 
     def centroid(self) -> Vector2:
         """Return the local center of the rectangle, ``(0, 0)``."""
-        return Vector2.zero()
+        return self.center
 
     def vertices(self) -> tuple[Vector2, Vector2, Vector2, Vector2]:
         """Return the four local corners in counter-clockwise order.

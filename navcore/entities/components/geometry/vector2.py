@@ -132,3 +132,12 @@ class Vector2:
     def to_tuple(self) -> tuple[float, float]:
         """Return this vector as an ``(x, y)`` tuple."""
         return (self.x, self.y)
+
+    def __getitem__(self, index: int) -> float:
+        """Enable indexing like a tuple: ``v[0]`` is x, ``v[1]`` is y."""
+        if index == 0:
+            return self.x
+        elif index == 1:
+            return self.y
+        else:
+            raise IndexError("Vector2 only has two components (x, y).")

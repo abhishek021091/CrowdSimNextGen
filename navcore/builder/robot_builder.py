@@ -1,29 +1,52 @@
-import numpy as np
+from pathlib import Path
 
-from navcore.configs import env
+import numpy as np
+import tomllib
+
+import navcore.configs
 from navcore.entities.agents.robot import Robot
+from navcore.entities.components.goal import Goal
+from navcore.entities.components.pose import Pose
 
 
 class RobotBuilder:
+    assert navcore.configs.__file__ is not None
+    env_path = Path(navcore.configs.__file__).parent / "env.toml"
+    with open(Path(env_path), "rb") as f:
+        env_config = tomllib.load(f)
+    rand = np.random.default_rng(seed=env_config["random"]["seed"])
+
     def __init__(self):
         pass
 
     def build_robot(self):
         robot = Robot()
         robot.set_state(
-            *self.generate_pose(),
-            *self.generate_goal(),
+            self.generate_pose(),
+            self.generate_goal(),
             robot.v_pref,
             robot.radius,
         )
 
-    def generate_pose(self):
-        theta = self.rng.uniform(0, 2 * np.pi)
-        px = self.rng.uniform(-env["arena"]["width"] / 2, env["arena"]["width"] / 2)
-        py = self.rng.uniform(-env["arena"]["height"] / 2, env["arena"]["height"] / 2)
-        return px, py, theta
+    def generate_pose(self) -> Pose:
+        theta = self.rand.uniform(0, 2 * np.pi)
+        px = self.rand.uniform(
+            -self.env_config["arena"]["width"] / 2,
+            self.env_config["arena"]["width"] / 2,
+        )
+        py = self.rand.uniform(
+            -self.env_config["arena"]["height"] / 2,
+            self.env_config["arena"]["height"] / 2,
+        )
+        return Pose(px, py, theta)
 
-    def generate_goal(self):
-        gx = self.rng.uniform(-env["arena"]["width"] / 2, env["arena"]["width"] / 2)
-        gy = self.rng.uniform(-env["arena"]["height"] / 2, env["arena"]["height"] / 2)
-        return gx, gy
+    def generate_goal(self) -> Goal:
+        gx = self.rand.uniform(
+            -self.env_config["arena"]["width"] / 2,
+            self.env_config["arena"]["width"] / 2,
+        )
+        gy = self.rand.uniform(
+            -self.env_config["arena"]["height"] / 2,
+            self.env_config["arena"]["height"] / 2,
+        )
+        return Goal(gx, gy)

@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from navcore.entities.components.geometry import Circle, Polygon, Rectangle, Vector2
+from navcore.entities.components.geometry.circle import Circle
+from navcore.entities.components.geometry.polygon import Polygon
+from navcore.entities.components.geometry.rectangle import Rectangle
+from navcore.entities.components.geometry.vector2 import Vector2
 
 from .obstacle import Obstacle
 
@@ -49,19 +52,6 @@ class Table:
     name: str | None = None
     traversable: bool = False
     visible: bool = True
-
-    def __post_init__(self) -> None:
-        """Validate that ``shape`` is one of the supported geometry kinds.
-
-        Raises:
-            TypeError: If ``shape`` is not a ``Circle``, ``Rectangle``,
-                or ``Polygon``.
-        """
-        if not isinstance(self.shape, (Circle, Rectangle, Polygon)):
-            raise TypeError(
-                "Table shape must be Circle, Rectangle, or Polygon, "
-                f"got {type(self.shape).__name__}."
-            )
 
     @classmethod
     def circular(

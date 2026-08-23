@@ -1,7 +1,9 @@
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from navcore.entities.components.geometry import Geometry, Line, Vector2
+from navcore.entities.components.geometry.geometry import Geometry
+from navcore.entities.components.geometry.line import Line
+from navcore.entities.components.geometry.vector2 import Vector2
 
 
 @dataclass(slots=True, frozen=True)
