@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class Pedestrian(Agent):
     assert navcore.configs.__file__ is not None
     env_path = Path(navcore.configs.__file__).parent / "env.toml"
-    config_path = Path(navcore.configs.__file__).parent / "pedestrian.toml"
+    config_path = Path(navcore.configs.__file__).parent / "pedestrians.toml"
     with open(Path(config_path), "rb") as f:
         config = tomllib.load(f)
     with open(Path(env_path), "rb") as f:
@@ -27,12 +27,12 @@ class Pedestrian(Agent):
         self.kinematics = self.config["kinematics"]["chassis"]
         self.policy = self.config["policy"]
 
-        if self.env_config["randomize_pedestrian_radius"]:
+        if self.config["Randomization"]["randomize_pedestrian_radius"]:
             self.radius *= self.rand.uniform(
                 self.config["physical"]["radius"] * 0.8,
                 self.config["physical"]["radius"] * 1.2,
             )
-        if self.env_config["randomize_pedestrian_v_pref"]:
+        if self.config["Randomization"]["randomize_pedestrian_v_pref"]:
             self.v_pref *= self.rand.uniform(
                 self.config["kinematics"]["v_pref"] * 0.8,
                 self.config["kinematics"]["v_pref"] * 1.2,
@@ -61,4 +61,14 @@ class Pedestrian(Agent):
             self.pose.theta,
             self.radius,
             self.v_pref,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"Pedestrian("
+            f"pose={self.pose}, "
+            f"goal={self.goal}, "
+            f"velocity={self.velocity}, "
+            f"radius={self.radius}, "
+            f"v_pref={self.v_pref})"
         )

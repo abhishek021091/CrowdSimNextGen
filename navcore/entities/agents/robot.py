@@ -25,10 +25,10 @@ class Robot(Agent):
         self.observable = self.config["physical"]["observable"]
         self.v_pref = self.config["kinematics"]["v_pref"]
         self.radius = self.config["physical"]["radius"]
-        self.sweep = self.config["sweep"]
-        if self.sweep:
-            self.sweep_axis = self.config["sweep_axis"]
-        self.observable = self.config["physical"]["observable"]
+
+    def observe(self):
+        self.sensor_range = self.config["sensors"]["sensor_range"]
+        self.sensor_fov = np.pi * self.config["sensors"]["sensor_fov"]
 
     def print_info(self) -> None:
         if self.pose is None or self.velocity is None or self.goal is None:
@@ -46,4 +46,14 @@ class Robot(Agent):
             self.pose.theta,
             self.radius,
             self.v_pref,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"Robot("
+            f"pose={self.pose}, "
+            f"goal={self.goal}, "
+            f"velocity={self.velocity}, "
+            f"radius={self.radius}, "
+            f"v_pref={self.v_pref})"
         )

@@ -15,8 +15,8 @@ class Agent:
         self.agent: str = agent_type
         self.config: dict[str, Any] = config
 
-        self.v_pref: float = self.config["v_pref"]
-        self.radius: float = self.config["radius"]
+        self.v_pref: float = self.config["kinematics"]["v_pref"]
+        self.radius: float = self.config["physical"]["radius"]
 
         self.pose: Pose | None = None
         self.goal: Goal | None = None

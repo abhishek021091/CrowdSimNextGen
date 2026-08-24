@@ -2,11 +2,11 @@
 # Obstacle Configuration file
 #==========================================================================
 
-[boundary]
-boundary = true
-boundary_thickness = 0.1
+[table]
+num_tables = 5
+shape = "circular"
+radius = 0.5
+randomize_radius = true
 
-[pillar]
-pillar = true
-pillar_radius = 0.2
-num_pillars = 0
+[boundary]
+gate = { enabled = true, num_gates = 2 }

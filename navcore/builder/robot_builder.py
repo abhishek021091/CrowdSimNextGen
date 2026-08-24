@@ -17,7 +17,7 @@ class RobotBuilder:
     rand = np.random.default_rng(seed=env_config["random"]["seed"])
 
     def __init__(self):
-        pass
+        self.robot: Robot | None = None
 
     def build_robot(self):
         robot = Robot()
@@ -27,26 +27,27 @@ class RobotBuilder:
             robot.v_pref,
             robot.radius,
         )
+        self.robot = robot
 
     def generate_pose(self) -> Pose:
         theta = self.rand.uniform(0, 2 * np.pi)
         px = self.rand.uniform(
-            -self.env_config["arena"]["width"] / 2,
-            self.env_config["arena"]["width"] / 2,
+            -self.env_config["arenaSize"]["width"] / 2,
+            self.env_config["arenaSize"]["width"] / 2,
         )
         py = self.rand.uniform(
-            -self.env_config["arena"]["height"] / 2,
-            self.env_config["arena"]["height"] / 2,
+            -self.env_config["arenaSize"]["height"] / 2,
+            self.env_config["arenaSize"]["height"] / 2,
         )
         return Pose(px, py, theta)
 
     def generate_goal(self) -> Goal:
         gx = self.rand.uniform(
-            -self.env_config["arena"]["width"] / 2,
-            self.env_config["arena"]["width"] / 2,
+            -self.env_config["arenaSize"]["width"] / 2,
+            self.env_config["arenaSize"]["width"] / 2,
         )
         gy = self.rand.uniform(
-            -self.env_config["arena"]["height"] / 2,
-            self.env_config["arena"]["height"] / 2,
+            -self.env_config["arenaSize"]["height"] / 2,
+            self.env_config["arenaSize"]["height"] / 2,
         )
         return Goal(gx, gy)
