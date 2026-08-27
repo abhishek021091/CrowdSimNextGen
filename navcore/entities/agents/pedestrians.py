@@ -11,18 +11,26 @@ logger = logging.getLogger(__name__)
 
 
 class Pedestrian(Agent):
+    """A crowd member.
+
+    ``rand`` is injected at construction, not seeded internally -- the
+    same fix already applied to ``CrowdSpawner``/``RobotBuilder``/
+    ``ObstacleBuilder``. A previous version of this class seeded its
+    own class-level generator once at import time, shared across every
+    instance; radius/v_pref randomization therefore advanced regardless
+    of which seed a caller thought it was using, silently breaking
+    end-to-end reproducibility for any run with randomization enabled.
+    """
+
     assert navcore.configs.__file__ is not None
-    env_path = Path(navcore.configs.__file__).parent / "env.toml"
     config_path = Path(navcore.configs.__file__).parent / "pedestrians.toml"
     with open(Path(config_path), "rb") as f:
         config = tomllib.load(f)
-    with open(Path(env_path), "rb") as f:
-        env_config = tomllib.load(f)
-    rand = np.random.default_rng(seed=env_config["random"]["seed"])
 
-    def __init__(self) -> None:
+    def __init__(self, rand: np.random.Generator) -> None:
         super().__init__(self.config, "Pedestrian")
-        self.id = None
+        self.rand = rand
+        self.id: str | None = None
         self.observed_id = -1
         self.kinematics = self.config["kinematics"]["chassis"]
         self.policy = self.config["policy"]
@@ -41,16 +49,14 @@ class Pedestrian(Agent):
             self.radius = self.config["physical"]["radius"]
             self.v_pref = self.config["kinematics"]["v_pref"]
 
-    def set_id(self, id: int) -> None:
+    def set_id(self, id: str) -> None:
         self.id = id
 
     def print_info(self) -> None:
         if self.pose is None or self.velocity is None or self.goal is None:
             raise RuntimeError("Pose or velocity has not been initialized.")
-
         logger.info(
-            "Pedestrian %s: px=%s, py=%s, gx=%s, gy=%s, "
-            "vx=%s, vy=%s, theta=%s, radius=%s, v_pref=%s",
+            "Pedestrian %s: px=%s, py=%s, gx=%s, gy=%s, vx=%s, vy=%s, theta=%s, radius=%s, v_pref=%s",
             self.id,
             self.pose.px,
             self.pose.py,
@@ -65,10 +71,6 @@ class Pedestrian(Agent):
 
     def __repr__(self) -> str:
         return (
-            f"Pedestrian("
-            f"pose={self.pose}, "
-            f"goal={self.goal}, "
-            f"velocity={self.velocity}, "
-            f"radius={self.radius}, "
-            f"v_pref={self.v_pref})"
+            f"Pedestrian(pose={self.pose}, goal={self.goal}, "
+            f"velocity={self.velocity}, radius={self.radius}, v_pref={self.v_pref})"
         )

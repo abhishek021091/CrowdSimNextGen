@@ -1,3 +1,10 @@
+"""ObstacleBuilder: places the episode's static obstacles.
+
+Takes its random generator as a constructor argument for the same
+reason as ``RobotBuilder`` -- see that module's docstring. Only the
+RNG-sourcing changed here; placement logic is unchanged.
+"""
+
 from pathlib import Path
 
 import numpy as np
@@ -18,49 +25,33 @@ class ObstacleBuilder:
         config = tomllib.load(f)
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
-    rand = np.random.default_rng(seed=env_config["random"]["seed"])
 
-    def __init__(self):
+    def __init__(self, rand: np.random.Generator) -> None:
+        self.rand = rand
         self.obstacles: list[Obstacle] = []
 
-    def build_boundary(self):
+    def build_boundary(self) -> None:
         if self.config["boundary"]["gate"]["num_gates"] > 0:
-            gateNum = self.config["boundary"]["gate"]["num_gates"]
+            gate_num = self.config["boundary"]["gate"]["num_gates"]
             gates: list[BoundaryGate] = []
-            edge_index = np.random.choice([0, 1, 2, 3])
+            edge_index = int(self.rand.choice([0, 1, 2, 3]))
             if edge_index == 0 or edge_index == 2:
-                offset = np.random.uniform(0, self.env_config["arenaSize"]["width"])
+                offset = self.rand.uniform(0, self.env_config["arenaSize"]["width"])
             else:
-                offset = np.random.uniform(
+                offset = self.rand.uniform(
                     0, self.env_config["arenaSize"]["height"] / 2
                 )
-            width = np.random.uniform(1, 4)
-            for _ in range(gateNum):
-                gate = BoundaryGate(edge_index, offset, width)
-                gates.append(gate)
+            width = self.rand.uniform(1, 4)
+            for _ in range(gate_num):
+                gates.append(BoundaryGate(edge_index, offset, width))
 
-            edges: tuple[Vector2, Vector2, Vector2, Vector2] = (
-                Vector2(
-                    -self.env_config["arenaSize"]["width"] / 2,
-                    -self.env_config["arenaSize"]["height"] / 2,
-                ),
-                Vector2(
-                    self.env_config["arenaSize"]["width"] / 2,
-                    -self.env_config["arenaSize"]["height"] / 2,
-                ),
-                Vector2(
-                    self.env_config["arenaSize"]["width"] / 2,
-                    self.env_config["arenaSize"]["height"] / 2,
-                ),
-                Vector2(
-                    -self.env_config["arenaSize"]["width"] / 2,
-                    self.env_config["arenaSize"]["height"] / 2,
-                ),
-            )
-            boundaryWall = Boundary(id="boundary", vertices=edges, gates=tuple(gates))
-            self.obstacles.append(boundaryWall.to_obstacle())
+            w = self.env_config["arenaSize"]["width"] / 2
+            h = self.env_config["arenaSize"]["height"] / 2
+            edges = (Vector2(-w, -h), Vector2(w, -h), Vector2(w, h), Vector2(-w, h))
+            boundary_wall = Boundary(id="boundary", vertices=edges, gates=tuple(gates))
+            self.obstacles.append(boundary_wall.to_obstacle())
 
-    def build_table(self):
+    def build_table(self) -> None:
         num_tables = self.config["table"]["num_tables"]
         table_shape = self.config["table"]["shape"]
 
@@ -70,7 +61,6 @@ class ObstacleBuilder:
                 table_radius = self.config["table"]["radius"]
                 if self.config["table"]["randomize_radius"]:
                     table_radius = table_radius + self.rand.uniform(-0.5, 0.5)
-
                 table_center = Vector2(
                     self.rand.uniform(
                         -self.env_config["arenaSize"]["width"] / 2 + table_radius,
@@ -86,8 +76,6 @@ class ObstacleBuilder:
                     center=table_center,
                     radius=table_radius,
                     name=f"Table {i}",
-                    traversable=False,
-                    visible=True,
                 )
             elif table_shape == "rectangular":
                 table_width = self.config["table"]["width"]
@@ -111,8 +99,6 @@ class ObstacleBuilder:
                     width=table_width,
                     height=table_height,
                     name=f"Table {i}",
-                    traversable=False,
-                    visible=True,
                 )
             else:
                 raise ValueError(f"Invalid table shape: {table_shape}")
