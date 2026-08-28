@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from navcore.entities.components.geometry.vector2 import Vector2
+from navcore.entities.components.goal import Goal
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,10 +33,10 @@ class Group:
             are computed relative to. Must be one of ``member_ids``.
     """
 
-    id: str
-    member_ids: tuple[str, ...]
-    goal: Vector2
-    leader_id: str
+    id: int
+    member_ids: tuple[int, ...]
+    goal: Goal
+    leader_id: int
 
     def __post_init__(self) -> None:
         """Validate membership.
@@ -53,10 +53,10 @@ class Group:
                 f"member_ids={self.member_ids!r}."
             )
 
-    def is_leader(self, agent_id: str) -> bool:
+    def is_leader(self, agent_id: int) -> bool:
         """Return whether ``agent_id`` is this group's leader."""
         return agent_id == self.leader_id
 
-    def followers(self) -> tuple[str, ...]:
+    def followers(self) -> tuple[int, ...]:
         """Return member ids other than the leader."""
         return tuple(m for m in self.member_ids if m != self.leader_id)

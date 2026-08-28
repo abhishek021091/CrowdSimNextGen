@@ -23,18 +23,16 @@ yet, to keep this first version simple and testable.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
+from navcore.entities.agents.agent import Agent
 from navcore.entities.components.geometry.vector2 import Vector2
-from navcore.entities.components.state import ObservableState
+from navcore.entities.components.goal import Goal
+from navcore.entities.components.pose import Pose
 from navcore.entities.groups.group import Group
 
-if TYPE_CHECKING:
-    from navcore.entities.agents.agent import Agent
-
 #: Resolves an agent id to its live ``Agent`` instance.
-AgentLookup = Callable[[str], "Agent"]
+AgentLookup = Callable[[int], Agent]
 
 
 class GroupGoalReachingMission:
@@ -52,7 +50,7 @@ class GroupGoalReachingMission:
 
     def __init__(
         self,
-        agent_id: str,
+        agent_id: int,
         group: Group,
         agent_lookup: AgentLookup,
         formation_offset: Vector2 | None = None,
@@ -68,21 +66,28 @@ class GroupGoalReachingMission:
         self.agent_lookup = agent_lookup
         self.formation_offset = formation_offset
 
-    def get_target(self, agent: Agent, neighbors: Sequence[ObservableState]) -> Vector2:
-        """Return the group goal (leader) or a formation offset (follower).
-
-        Raises:
-            RuntimeError: If this is a follower and the leader's pose has
-                not been initialized yet.
-        """
+    def set_pos(self) -> None:
         if self.group.is_leader(self.agent_id):
-            return self.group.goal
+            return
 
         leader = self.agent_lookup(self.group.leader_id)
+        ped = self.agent_lookup(self.agent_id)
+
         if leader.pose is None:
             raise RuntimeError(
-                f"Leader {self.group.leader_id!r} has no pose yet; cannot "
-                f"compute a formation target for follower {self.agent_id!r}."
+                f"Leader {self.group.leader_id!r} has no pose yet; "
+                f"cannot compute a formation target."
             )
+
         leader_position = Vector2(leader.pose.px, leader.pose.py)
-        return leader_position + self.formation_offset
+
+        ped.pose = Pose(
+            leader_position.x + self.formation_offset.x,
+            leader_position.y + self.formation_offset.y,
+            theta=ped.pose.theta if ped.pose else 0.0,
+        )
+
+        ped.goal = Goal(
+            leader_position.x + self.formation_offset.x,
+            leader_position.y + self.formation_offset.y,
+        )

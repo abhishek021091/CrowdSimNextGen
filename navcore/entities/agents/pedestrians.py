@@ -6,6 +6,7 @@ import tomllib
 
 import navcore.configs
 from navcore.entities.agents.agent import Agent
+from navcore.entities.groups.group import Group
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ class Pedestrian(Agent):
     def __init__(self, rand: np.random.Generator) -> None:
         super().__init__(self.config, "Pedestrian")
         self.rand = rand
-        self.id: str | None = None
         self.observed_id = -1
+        self.group: Group | None = None
         self.kinematics = self.config["kinematics"]["chassis"]
         self.policy = self.config["policy"]
 
@@ -49,7 +50,7 @@ class Pedestrian(Agent):
             self.radius = self.config["physical"]["radius"]
             self.v_pref = self.config["kinematics"]["v_pref"]
 
-    def set_id(self, id: str) -> None:
+    def set_id(self, id: int) -> None:
         self.id = id
 
     def print_info(self) -> None:
@@ -71,6 +72,6 @@ class Pedestrian(Agent):
 
     def __repr__(self) -> str:
         return (
-            f"Pedestrian(pose={self.pose}, goal={self.goal}, "
+            f"Pedestrian(id ={self.id}, pose={self.pose}, goal={self.goal}, "
             f"velocity={self.velocity}, radius={self.radius}, v_pref={self.v_pref})"
         )

@@ -1,9 +1,10 @@
 #======================================================
 #Robots Configuration File
 #=======================================================
-
 [physical]
 radius = 0.3
+height = 0.5
+mass = 20.0
 observable = false
 
 [kinematics]
@@ -16,3 +17,11 @@ policy = "ORCA"
 [sensors]
 sensor_range = 5.0
 sensor_fov = 360.0
+
+[orca]
+neighbor_dist = 5.0
+max_neighbors = 10
+time_horizon = 5.0
+time_horizon_obst = 5.0
+agent_radius = 0.3
+max_speed = 1.0

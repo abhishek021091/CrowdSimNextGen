@@ -39,16 +39,16 @@ class RobotBuilder:
         self.robot = robot
 
     def generate_pose(self) -> Pose:
-        theta = self.rand.uniform(0, 2 * np.pi)
-        width = self.env_config["arenaSize"]["width"]
-        height = self.env_config["arenaSize"]["height"]
-        px = self.rand.uniform(-width / 2, width / 2)
-        py = self.rand.uniform(-height / 2, height / 2)
+        theta: float = self.rand.uniform(0, 2 * np.pi)
+        width: float = self.env_config["arenaSize"]["width"]
+        height: float = self.env_config["arenaSize"]["height"]
+        px: float = self.rand.uniform(-width / 2, width / 2)
+        py: float = self.rand.uniform(-height / 2, height / 2)
         return Pose(px, py, theta)
 
     def generate_goal(self) -> Goal:
-        width = self.env_config["arenaSize"]["width"]
-        height = self.env_config["arenaSize"]["height"]
-        gx = self.rand.uniform(-width / 2, width / 2)
-        gy = self.rand.uniform(-height / 2, height / 2)
+        width: float = self.env_config["arenaSize"]["width"]
+        height: float = self.env_config["arenaSize"]["height"]
+        gx: float = self.rand.uniform(-width / 2, width / 2)
+        gy: float = self.rand.uniform(-height / 2, height / 2)
         return Goal(gx, gy)

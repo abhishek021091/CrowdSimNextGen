@@ -11,6 +11,12 @@ from navcore.entities.components.velocity import Velocity
 
 
 class Agent:
+    assert navcore.configs.__file__ is not None
+    env_path = Path(navcore.configs.__file__).parent / "env.toml"
+    with open(Path(env_path), "rb") as f:
+        env_config = tomllib.load(f)
+    time_step = env_config["policy"]["time_step"]
+
     def __init__(self, config: dict[str, Any], agent_type: str):
         self.agent: str = agent_type
         self.config: dict[str, Any] = config
@@ -22,24 +28,19 @@ class Agent:
         self.goal: Goal | None = None
         self.velocity: Velocity | None = None
 
-        assert navcore.configs.__file__ is not None
-        env_path = Path(navcore.configs.__file__).parent / "env.toml"
-        with open(Path(env_path), "rb") as f:
-            self.env_config = tomllib.load(f)
-
-        self.time_step = self.env_config["policy"]["time_step"]
-
     def set_state(
         self,
         pose: Pose,
         goal: Goal,
         v_pref: float,
         radius: float,
+        velocity: Velocity | None = None,
     ):
         self.pose = pose
         self.goal = goal
         self.radius = radius
         self.v_pref = v_pref
+        self.velocity = velocity if velocity is not None else Velocity(0.0, 0.0)
 
     def get_observable_state(self) -> ObservableState:
         if self.pose is None or self.velocity is None:
@@ -81,3 +82,9 @@ class Agent:
         if self.velocity is None:
             raise RuntimeError("Velocity has not been initialized.")
         return self.velocity
+
+    def set_velocity(self, vx: float, vy: float):
+        if self.velocity is None:
+            raise RuntimeError("Velocity has not been initialized.")
+        self.velocity.vx = vx
+        self.velocity.vy = vy

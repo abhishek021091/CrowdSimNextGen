@@ -19,18 +19,20 @@ class EnvironmentBuilder:
 
     def __init__(self):
         self.crowd_builder = CrowdBuilder()
-        self.robot_builder = RobotBuilder()
-        self.obstacle_builder = ObstacleBuilder()
+        self.robot_builder = RobotBuilder(self.rand)
+        self.obstacle_builder = ObstacleBuilder(self.rand)
 
     def build_environment(self) -> Environment:
 
         self.obstacle_builder.build_boundary()
         self.obstacle_builder.build_table()
         self.crowd_builder.build_crowd()
+        self.crowd_builder.build_groups()
         self.robot_builder.build_robot()
         assert self.robot_builder.robot is not None, "Robot has not been built."
         return Environment(
             self.obstacle_builder.obstacles,
             self.crowd_builder.crowd,
+            self.crowd_builder.groups,
             self.robot_builder.robot,
         )
