@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
-import tomllib
-import navcore.configs
 
+import tomllib
+
+import navcore.configs
 from navcore.entities.components.geometry.geometry import Geometry, Vector2
 
 
@@ -23,39 +24,40 @@ class Rectangle(Geometry):
     width: float
     height: float
 
+    assert navcore.configs.__file__ is not None
+    env_path = Path(navcore.configs.__file__).parent / "env.toml"
+    with open(Path(env_path), "rb") as f:
+        env_config = tomllib.load(f)
+
     def __post_init__(self) -> None:
         """Validate the dimensions.
 
         Raises:
             ValueError: If ``width`` or ``height`` is not strictly positive.
         """
-        assert navcore.configs.__file__ is not None
-        env_path = Path(navcore.configs.__file__).parent / "env.toml"
-        with open(Path(env_path), "rb") as f:
-            env = tomllib.load(f)
 
         if (
-            env["arenaSize"]["width"] <= self.center[0]
-            or -env["arenaSize"]["width"] >= self.center[0]
+            self.env_config["arenaSize"]["width"] <= self.center[0]
+            or -self.env_config["arenaSize"]["width"] >= self.center[0]
         ):
             raise ValueError(
                 f"Rectangle center x-coordinate is out of bounds, got {self.center[0]}."
             )
         if (
-            env["arenaSize"]["height"] <= self.center[1]
-            or -env["arenaSize"]["height"] >= self.center[1]
+            self.env_config["arenaSize"]["height"] <= self.center[1]
+            or -self.env_config["arenaSize"]["height"] >= self.center[1]
         ):
             raise ValueError(
                 f"Rectangle center y-coordinate is out of bounds, got {self.center[1]}."
             )
         if (
-            env["arenaSize"]["width"] <= self.width / 2.0
-            or -env["arenaSize"]["width"] >= self.width / 2.0
+            self.env_config["arenaSize"]["width"] <= self.width / 2.0
+            or -self.env_config["arenaSize"]["width"] >= self.width / 2.0
         ):
             raise ValueError(f"Rectangle width is out of bounds, got {self.width!r}.")
         if (
-            env["arenaSize"]["height"] <= self.height / 2.0
-            or -env["arenaSize"]["height"] >= self.height / 2.0
+            self.env_config["arenaSize"]["height"] <= self.height / 2.0
+            or -self.env_config["arenaSize"]["height"] >= self.height / 2.0
         ):
             raise ValueError(f"Rectangle height is out of bounds, got {self.height!r}.")
 

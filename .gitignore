@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-#Python RVO@
+#Python RVO
 Python-RVO2/
