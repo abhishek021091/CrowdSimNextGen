@@ -30,63 +30,71 @@ class Step:
     ROBOT_KEY = -1
     dt = env_config["policy"]["time_step"]
 
-    def __init__(self, planner: VelocityPlanner, robot_visible: bool) -> None:
+    def __init__(
+        self,
+        agent: Robot | Pedestrian,
+        planner: VelocityPlanner,
+        env: Environment,
+        robot_visible: bool,
+    ) -> None:
+        self.agent = agent
+        self.env = env
         self.planner: Any = planner
         self.robot_visible = robot_visible
 
-    def step(self, env: Environment) -> None:
-        self._validate(env)
-        self._advance_agent(env.robot)
-        for ped in env.crowd:
-            self._advance_agent(env.crowd[ped])
+    def step(self) -> None:
+        self._validate()
+        self._compute_velocities()
+        self._advance_agent(self.env.robot)
+        for ped in self.env.crowd.values():
+            self._advance_agent(ped)
 
-    def _validate(self, env: Environment) -> None:
+    def _validate(self) -> None:
         if (
-            env.robot.pose is None
-            or env.robot.velocity is None
-            or env.robot.goal is None
+            self.env.robot.pose is None
+            or self.env.robot.velocity is None
+            or self.env.robot.goal is None
         ):
             raise RuntimeError("Robot must have pose, velocity, and goal initialized.")
 
-        for ped in env.crowd:
-            if (
-                env.crowd[ped].pose is None
-                or env.crowd[ped].velocity is None
-                or env.crowd[ped].goal is None
-            ):
+        for ped in self.env.crowd.values():
+            if ped.pose is None or ped.velocity is None or ped.goal is None:
                 raise RuntimeError(
                     f"Pedestrian {ped.id} must have pose, velocity, and goal initialized."
                 )
 
-    def compute_velocities(
-        self, env: Environment
+    def _compute_velocities(
+        self,
     ) -> tuple[Velocity, dict[int, Velocity]]:
-        robot = env.robot
-        crowd = env.crowd
-        robot_observable_state = robot.get_observable_state()
-        crowd_observable_states = {
-            ped.id: ped.get_observable_state() for ped in crowd.values()
-        }
-        if self.robot_visible:
-            crowd_observable_states[self.ROBOT_KEY] = robot_observable_state
-        robot_velocity, crowd_velocities = self.planner.compute_velocities(
-            robot_observable_state, crowd_observable_states
+
+        assert self.agent.sensor is not None
+        observations = self.agent.sensor.observe(
+            self.env, robot_visible=self.robot_visible
         )
-        return robot_velocity, crowd_velocities
+        if isinstance(self.agent, Robot):
+            observations[self.ROBOT_KEY] = self.agent.get_observable_state()
+        else:
+            observations[self.agent.id] = self.agent.get_observable_state()
+
+        self_velocity, other_velocities = self.planner.compute_velocities(
+            self.agent.get_observable_state(),
+            observations,
+        )
+
+        return self_velocity, other_velocities
 
     def set_velocities(
         self,
-        env: Environment,
         robot_velocity: Velocity,
         crowd_velocities: dict[int, Velocity],
     ) -> None:
-        env.robot.set_velocity(robot_velocity.vx, robot_velocity.vy)
+        self.env.robot.set_velocity(robot_velocity.vx, robot_velocity.vy)
         for ped_id, vel in crowd_velocities.items():
             if ped_id == -1:
                 continue  # Skip the robot key
-            if ped_id not in env.crowd:
+            if ped_id not in self.env.crowd:
                 raise KeyError(f"Pedestrian ID {ped_id} not found in the environment.")
-            env.crowd[ped_id].set_velocity(vel.vx, vel.vy)
+            self.env.crowd[ped_id].set_velocity(vel.vx, vel.vy)
 
     def _advance_agent(self, agent: Agent) -> None:
         if agent.pose is None:

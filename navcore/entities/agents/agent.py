@@ -6,6 +6,7 @@ import tomllib
 import navcore.configs
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.pose import Pose
+from navcore.entities.components.sensors.sensor import RangeSensor
 from navcore.entities.components.state import FullState, ObservableState
 from navcore.entities.components.velocity import Velocity
 
@@ -27,6 +28,7 @@ class Agent:
         self.pose: Pose | None = None
         self.goal: Goal | None = None
         self.velocity: Velocity | None = None
+        self.sensor: RangeSensor | None = None
 
     def set_state(
         self,

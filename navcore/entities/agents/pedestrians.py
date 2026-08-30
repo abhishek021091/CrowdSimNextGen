@@ -6,6 +6,7 @@ import tomllib
 
 import navcore.configs
 from navcore.entities.agents.agent import Agent
+from navcore.entities.components.sensors.sensor import RangeSensor
 from navcore.entities.groups.group import Group
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,9 @@ class Pedestrian(Agent):
         self.group: Group | None = None
         self.kinematics = self.config["kinematics"]["chassis"]
         self.policy = self.config["policy"]
+        self.sensor_range = self.config["sensors"]["sensor_range"]
+        self.sensor_fov = np.pi * self.config["sensors"]["sensor_fov"]
+        self.sensor = RangeSensor(self)
 
         if self.config["Randomization"]["randomize_pedestrian_radius"]:
             self.radius *= self.rand.uniform(

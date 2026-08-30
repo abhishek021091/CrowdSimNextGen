@@ -12,3 +12,15 @@ class Environment:
     crowd: dict[int, Pedestrian]
     groups: dict[int, Group]
     robot: Robot
+
+    def robot_state(self) -> Robot:
+        return self.robot
+
+    def crowd_state(self) -> dict[int, Pedestrian]:
+        return self.crowd
+
+    def obstacle_state(self) -> dict[str, Obstacle]:
+        return self.obstacles
+
+    def group_state(self) -> dict[int, Group]:
+        return self.groups

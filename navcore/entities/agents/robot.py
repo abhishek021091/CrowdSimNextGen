@@ -5,6 +5,7 @@ import tomllib
 
 import navcore.configs
 from navcore.entities.agents.agent import Agent
+from navcore.entities.components.sensors.sensor import RangeSensor
 
 
 class Robot(Agent):
@@ -25,6 +26,7 @@ class Robot(Agent):
         self.observable = self.config["physical"]["observable"]
         self.v_pref = self.config["kinematics"]["v_pref"]
         self.radius = self.config["physical"]["radius"]
+        self.sensor = RangeSensor(self)
 
     def observe(self):
         self.sensor_range = self.config["sensors"]["sensor_range"]

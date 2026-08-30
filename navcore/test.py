@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.entities.components.velocity import Velocity
-from navcore.policies.robot_orca_local_planner import RobotORCAPlanner
+from navcore.policies.base_orca_planner import RobotORCAPlanner
 from navcore.step.step import Step
 
 
