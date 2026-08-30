@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import tomllib
 from numpy import atan2
@@ -25,7 +24,7 @@ class StepResult:
 class Step:
     assert navcore.configs.__file__ is not None
     env_path = Path(navcore.configs.__file__).parent / "env.toml"
-    with open(Path(env_path), "rb") as f:
+    with open(env_path, "rb") as f:
         env_config = tomllib.load(f)
 
     ROBOT_KEY = -1
@@ -40,15 +39,21 @@ class Step:
     ) -> None:
         self.agent = agent
         self.env = env
-        self.planner: Any = planner
+        self.robot = env.robot
+        self.crowd = env.crowd
+        self.planner = planner
         self.robot_visible = robot_visible
 
-    def step(self) -> None:
+    def step(self) -> StepResult:
         self._validate()
-        self._compute_velocities()
+        result = self._compute_velocities()
+        self.set_velocities(result.robot_velocity, result.crowd_velocities)
+
         self._advance_agent(self.env.robot)
         for ped in self.env.crowd.values():
             self._advance_agent(ped)
+
+        return result
 
     def _validate(self) -> None:
         if (
@@ -57,45 +62,62 @@ class Step:
             or self.env.robot.goal is None
         ):
             raise RuntimeError("Robot must have pose, velocity, and goal initialized.")
+        if self.env.robot.sensor is None:
+            raise RuntimeError("Robot sensor must be initialized.")
 
         for ped in self.env.crowd.values():
             if ped.pose is None or ped.velocity is None or ped.goal is None:
                 raise RuntimeError(
                     f"Pedestrian {ped.id} must have pose, velocity, and goal initialized."
                 )
+            if ped.sensor is None:
+                raise RuntimeError(f"Pedestrian {ped.id} sensor must be initialized.")
 
-    def _compute_velocities(
-        self,
-    ) -> tuple[Velocity, dict[int, Velocity]]:
+    def _compute_velocities(self) -> StepResult:
+        robot_velocity = self._compute_robot_velocity()
+        crowd_velocities = self._compute_crowd_velocities()
+        return StepResult(
+            robot_velocity=robot_velocity, crowd_velocities=crowd_velocities
+        )
 
-        assert self.agent.sensor is not None
-        observations = self.agent.sensor.observe(
+    def _compute_robot_velocity(self) -> Velocity:
+        assert self.env.robot.sensor is not None
+        robot_obs = self.env.robot.sensor.observe(
             self.env, robot_visible=self.robot_visible
         )
-        if isinstance(self.agent, Robot):
-            observations[self.ROBOT_KEY] = self.agent.get_observable_state()
-        else:
-            observations[self.agent.id] = self.agent.get_observable_state()
+        robot_obs[self.ROBOT_KEY] = self.env.robot.get_observable_state()
 
-        self_velocity, other_velocities = self.planner.compute_velocities(
-            self.agent.get_observable_state(),
-            observations,
+        robot_velocity, _ = self.planner.compute_velocities(
+            self.ROBOT_KEY,
+            self.env.robot.get_full_state(),
+            robot_obs,
         )
+        return robot_velocity
 
-        return self_velocity, other_velocities
+    def _compute_crowd_velocities(self) -> dict[int, Velocity]:
+        crowd_velocities: dict[int, Velocity] = {}
+
+        for ped_id, ped in self.env.crowd.items():
+            assert ped.sensor is not None
+            ped_obs = ped.sensor.observe(self.env, robot_visible=self.robot_visible)
+            ped_obs[ped_id] = ped.get_observable_state()
+
+            ped_velocity, _ = self.planner.compute_velocities(
+                ped_id,
+                ped.get_full_state(),
+                ped_obs,
+            )
+            crowd_velocities[ped_id] = ped_velocity
+
+        return crowd_velocities
 
     def set_velocities(
         self,
         robot_velocity: Velocity,
         crowd_velocities: dict[int, Velocity],
     ) -> None:
-        self.env.robot.set_velocity(robot_velocity.vx, robot_velocity.vy)
-        for ped_id, vel in crowd_velocities.items():
-            if ped_id == -1:
-                continue  # Skip the robot key
-            if ped_id not in self.env.crowd:
-                raise KeyError(f"Pedestrian ID {ped_id} not found in the environment.")
-            self.env.crowd[ped_id].set_velocity(vel.vx, vel.vy)
+        self._apply_robot_velocity(self.env.robot, {self.ROBOT_KEY: robot_velocity})
+        self._apply_crowd_velocities(list(self.env.crowd.values()), crowd_velocities)
 
     def _advance_agent(self, agent: Agent) -> None:
         if agent.pose is None:
@@ -103,22 +125,20 @@ class Step:
         if agent.velocity is None:
             raise RuntimeError("Agent velocity is missing.")
 
-        # Assumes pose uses px/py and velocity uses vx/vy
         agent.pose.px += agent.velocity.vx * self.dt
         agent.pose.py += agent.velocity.vy * self.dt
 
-        # Optional heading update if your pose has an angle field
         speed_sq = (
             agent.velocity.vx * agent.velocity.vx
             + agent.velocity.vy * agent.velocity.vy
         )
-        if speed_sq > 1e-12:
-            heading = atan2(agent.velocity.vy, agent.velocity.vx)
-            if hasattr(agent.pose, "theta"):
-                agent.pose.theta = heading
+        if speed_sq > 1e-12 and hasattr(agent.pose, "theta"):
+            agent.pose.theta = atan2(agent.velocity.vy, agent.velocity.vx)
 
     def _apply_robot_velocity(
-        self, robot: Robot, velocities: dict[int, Velocity]
+        self,
+        robot: Robot,
+        velocities: dict[int, Velocity],
     ) -> Velocity:
         if self.ROBOT_KEY not in velocities:
             raise KeyError("Planner did not return a velocity for the robot.")
@@ -126,12 +146,13 @@ class Step:
         return robot.velocity
 
     def _apply_crowd_velocities(
-        self, crowd: list[Pedestrian], velocities: dict[int, Velocity]
+        self,
+        crowd: list[Pedestrian],
+        velocities: dict[int, Velocity],
     ) -> dict[int, Velocity]:
         crowd_velocities: dict[int, Velocity] = {}
 
         for ped in crowd:
-            assert ped.id is not None
             if ped.id not in velocities:
                 raise KeyError(
                     f"Planner did not return a velocity for pedestrian '{ped.id}'."
