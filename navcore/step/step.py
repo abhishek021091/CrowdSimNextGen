@@ -13,6 +13,7 @@ from navcore.entities.agents.pedestrians import Pedestrian
 from navcore.entities.agents.robot import Robot
 from navcore.entities.components.velocity import Velocity
 from navcore.environment.environment import Environment
+from navcore.middleware.orca_middleware import VelocityPlanner
 
 
 @dataclass(slots=True)
