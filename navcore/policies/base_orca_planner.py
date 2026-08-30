@@ -183,9 +183,14 @@ class BaseORCAPlanner(Generic[AgentId]):
         self._time_horizon: float = orca["time_horizon"]
         self._time_horizon_obst: float = orca["time_horizon_obst"]
 
-        self.sim: RVOSimulator = cast(
-            RVOSimulator,
-            rvo2.PyRVOSimulator(self.TIME_STEP, 0.0, 0),  # type: ignore[arg-type]
+        self.sim = rvo2.PyRVOSimulator(
+            self.TIME_STEP,
+            self._neighbor_dist,
+            self._max_neighbors,
+            self._time_horizon,
+            self._time_horizon_obst,
+            0.0,  # radius and max_speed are per-agent, not global
+            0.0,
         )
 
         self._rvo_ids: dict[AgentId, int] = {}

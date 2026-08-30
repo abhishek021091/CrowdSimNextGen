@@ -50,7 +50,7 @@ Design note -- why obstacles are bound at construction, not per call:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Protocol
 
 from navcore.entities.components.goal import Goal
@@ -106,10 +106,13 @@ class DecentralizedORCAPlanner:
             per-call solve.
     """
 
-    def __init__(self, config_file: str, obstacles: Sequence[Obstacle] = ()) -> None:
+    def __init__(
+        self, config_file: str, obstacles: dict[str, Obstacle] | None = None
+    ) -> None:
         self.config_file = config_file
+        assert obstacles is not None
         self._obstacle_vertices: list[list[tuple[float, float]]] = [
-            obstacle_to_vertices(obstacle) for obstacle in obstacles
+            obstacle_to_vertices(obstacle) for obstacle in obstacles.values()
         ]
 
     def compute_velocities(

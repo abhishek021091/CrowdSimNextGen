@@ -1,0 +1,7 @@
+[orca]
+neighbor_dist = 5.0
+max_neighbors = 10
+time_horizon = 5.0
+time_horizon_obst = 5.0
+agent_radius = 0.3
+max_speed = 1

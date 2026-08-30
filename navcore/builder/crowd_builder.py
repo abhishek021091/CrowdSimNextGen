@@ -63,7 +63,8 @@ class CrowdBuilder:
                     group=group,
                     agent_lookup=agent_lookup,
                 )
-                member.set_pos()
+                member.set_position()
+                member.set_goal()
                 self.groups[i] = group
 
     def generate_pose(self) -> Pose:

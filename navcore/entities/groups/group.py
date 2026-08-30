@@ -60,3 +60,7 @@ class Group:
     def followers(self) -> tuple[int, ...]:
         """Return member ids other than the leader."""
         return tuple(m for m in self.member_ids if m != self.leader_id)
+
+    def __iter__(self):
+        """Iterate over member ids in order."""
+        return iter(self.member_ids)

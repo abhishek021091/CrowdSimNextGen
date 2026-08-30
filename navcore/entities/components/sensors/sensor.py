@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from math import hypot
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from navcore.entities.components.state import ObservableState
 
 if TYPE_CHECKING:
@@ -23,7 +25,8 @@ class Sensor(ABC):
 class RangeSensor(Sensor):
     def __init__(self, agent: Pedestrian | Robot) -> None:
         self.agent = agent
-        self.range = agent.config["sensors"]["range"]
+        self.range = agent.config["sensors"]["sensor_range"]
+        self.fov = agent.config["sensors"]["sensor_fov"] * np.pi
 
     def observe(
         self, environment: Environment, robot_visible: bool

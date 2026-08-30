@@ -13,6 +13,7 @@ from navcore.entities.agents.robot import Robot
 from navcore.entities.components.velocity import Velocity
 from navcore.environment.environment import Environment
 from navcore.middleware.orca_middleware import VelocityPlanner
+from navcore.missions.group_goal_reaching import GroupGoalReachingMission
 
 
 @dataclass(slots=True)
@@ -32,12 +33,10 @@ class Step:
 
     def __init__(
         self,
-        agent: Robot | Pedestrian,
         planner: VelocityPlanner,
         env: Environment,
         robot_visible: bool,
     ) -> None:
-        self.agent = agent
         self.env = env
         self.robot = env.robot
         self.crowd = env.crowd
@@ -46,6 +45,7 @@ class Step:
 
     def step(self) -> StepResult:
         self._validate()
+        self._change_group_goals()
         result = self._compute_velocities()
         self.set_velocities(result.robot_velocity, result.crowd_velocities)
 
@@ -161,3 +161,13 @@ class Step:
             crowd_velocities[ped.id] = ped.velocity
 
         return crowd_velocities
+
+    def _change_group_goals(self) -> None:
+        groups = self.env.group_state()
+        for group in groups.values():
+            for member_id in group:
+                GroupGoalReachingMission(
+                    agent_id=member_id,
+                    group=group,
+                    agent_lookup=self.env.crowd.__getitem__,
+                ).set_goal()

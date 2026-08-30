@@ -66,7 +66,7 @@ class GroupGoalReachingMission:
         self.agent_lookup = agent_lookup
         self.formation_offset = formation_offset
 
-    def set_pos(self) -> None:
+    def set_position(self) -> None:
         if self.group.is_leader(self.agent_id):
             return
 
@@ -86,6 +86,21 @@ class GroupGoalReachingMission:
             leader_position.y + self.formation_offset.y,
             theta=ped.pose.theta if ped.pose else 0.0,
         )
+
+    def set_goal(self) -> None:
+        if self.group.is_leader(self.agent_id):
+            return
+
+        leader = self.agent_lookup(self.group.leader_id)
+        ped = self.agent_lookup(self.agent_id)
+
+        if leader.pose is None:
+            raise RuntimeError(
+                f"Leader {self.group.leader_id!r} has no pose yet; "
+                f"cannot compute a formation target."
+            )
+
+        leader_position = Vector2(leader.pose.px, leader.pose.py)
 
         ped.goal = Goal(
             leader_position.x + self.formation_offset.x,

@@ -7,6 +7,7 @@ import navcore.configs
 from navcore.builder.crowd_builder import CrowdBuilder
 from navcore.builder.obstacle_builder import ObstacleBuilder
 from navcore.builder.robot_builder import RobotBuilder
+from navcore.entities.agents.pedestrians import Pedestrian
 from navcore.environment.environment import Environment
 
 
@@ -24,7 +25,7 @@ class EnvironmentBuilder:
 
     def build_environment(self) -> Environment:
 
-        self.obstacle_builder.build_boundary()
+        # self.obstacle_builder.build_boundary()
         self.obstacle_builder.build_table()
         self.crowd_builder.build_crowd()
         self.crowd_builder.build_groups()
@@ -36,3 +37,8 @@ class EnvironmentBuilder:
             self.crowd_builder.groups,
             self.robot_builder.robot,
         )
+
+    def build_crowd(self) -> dict[int, "Pedestrian"]:
+        crowd = self.crowd_builder.build_crowd()
+        self.crowd_builder.build_groups()
+        return crowd
