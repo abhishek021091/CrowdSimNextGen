@@ -164,6 +164,7 @@ class DecentralizedORCAPlanner:
         matching ``BaseORCAPlanner._preferred_velocity``'s
         divide-by-zero guard.
         """
+        safety_distance = 0.1  # TODO: make this a config param, not hard-coded
         pose = observed.pose
         velocity = observed.velocity
         if velocity.vx == 0.0 and velocity.vy == 0.0:
@@ -177,6 +178,6 @@ class DecentralizedORCAPlanner:
             pose=Pose(pose.px, pose.py, pose.theta),
             goal=goal,
             velocity=Velocity(velocity.vx, velocity.vy),
-            radius=observed.radius,
+            radius=observed.radius + safety_distance,
             preferred_speed=preferred_speed,
         )

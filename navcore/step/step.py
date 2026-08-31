@@ -47,7 +47,7 @@ class Step:
         self._validate()
         self._change_group_goals()
         result = self._compute_velocities()
-        self.set_velocities(result.robot_velocity, result.crowd_velocities)
+        self._set_velocities(result.robot_velocity, result.crowd_velocities)
 
         self._advance_agent(self.env.robot)
         for ped in self.env.crowd.values():
@@ -111,7 +111,7 @@ class Step:
 
         return crowd_velocities
 
-    def set_velocities(
+    def _set_velocities(
         self,
         robot_velocity: Velocity,
         crowd_velocities: dict[int, Velocity],
@@ -171,3 +171,11 @@ class Step:
                     group=group,
                     agent_lookup=self.env.crowd.__getitem__,
                 ).set_goal()
+
+    def _goal_reached(self, agent: Agent) -> bool:
+        if agent.pose is None or agent.goal is None:
+            raise RuntimeError("Agent pose or goal has not been initialized.")
+        distance = (
+            (agent.goal.gx - agent.pose.px) ** 2 + (agent.goal.gy - agent.pose.py) ** 2
+        ) ** 0.5
+        return distance <= 0.5

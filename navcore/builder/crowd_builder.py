@@ -19,9 +19,13 @@ class CrowdBuilder:
         config = tomllib.load(f)
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
-    rand = np.random.default_rng(seed=env_config["random"]["seed"])
 
-    def __init__(self):
+    def __init__(self, rand: np.random.Generator | None = None):
+        self.rand = (
+            rand
+            if rand is not None
+            else np.random.default_rng(seed=self.env_config["random"]["seed"])
+        )
         self.pedestrian_num = self.env_config["pedestrians"]["num_pedestrians"]
         self.groups: dict[int, Group] = {}
         self.crowd: dict[int, Pedestrian] = {}

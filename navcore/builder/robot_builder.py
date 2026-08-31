@@ -27,14 +27,21 @@ class RobotBuilder:
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
 
-    def __init__(self, rand: np.random.Generator) -> None:
-        self.rand = rand
-        self.robot: Robot | None = None
+    def __init__(self, rand: np.random.Generator | None = None) -> None:
+        self.rand = (
+            rand
+            if rand is not None
+            else np.random.default_rng(seed=self.env_config["random"]["seed"])
+        )
+        self.robot: Robot
 
     def build_robot(self) -> None:
         robot = Robot()
         robot.set_state(
-            self.generate_pose(), self.generate_goal(), robot.v_pref, robot.radius
+            self.generate_pose(),
+            self.generate_goal(),
+            robot.v_pref,
+            robot.radius,
         )
         self.robot = robot
 
@@ -52,3 +59,6 @@ class RobotBuilder:
         gx: float = self.rand.uniform(-width / 2, width / 2)
         gy: float = self.rand.uniform(-height / 2, height / 2)
         return Goal(gx, gy)
+
+    def __repr__(self) -> str:
+        return f"RobotBuilder(rand={self.rand}, robot={self.robot})"

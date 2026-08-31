@@ -26,8 +26,12 @@ class ObstacleBuilder:
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
 
-    def __init__(self, rand: np.random.Generator) -> None:
-        self.rand = rand
+    def __init__(self, rand: np.random.Generator | None = None) -> None:
+        self.rand = (
+            rand
+            if rand is not None
+            else np.random.default_rng(seed=self.env_config["random"]["seed"])
+        )
         self.obstacles: dict[str, Obstacle] = {}
 
     def build_boundary(self) -> None:

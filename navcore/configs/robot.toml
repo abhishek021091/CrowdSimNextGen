@@ -25,3 +25,6 @@ time_horizon = 5.0
 time_horizon_obst = 5.0
 agent_radius = 0.3
 max_speed = 1.0
+
+[safety]
+safety_margin = 0.5

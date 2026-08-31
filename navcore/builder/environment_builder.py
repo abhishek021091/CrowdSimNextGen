@@ -30,7 +30,6 @@ class EnvironmentBuilder:
         self.crowd_builder.build_crowd()
         self.crowd_builder.build_groups()
         self.robot_builder.build_robot()
-        assert self.robot_builder.robot is not None, "Robot has not been built."
         return Environment(
             self.obstacle_builder.obstacles,
             self.crowd_builder.crowd,
@@ -41,4 +40,21 @@ class EnvironmentBuilder:
     def build_crowd(self) -> dict[int, "Pedestrian"]:
         crowd = self.crowd_builder.build_crowd()
         self.crowd_builder.build_groups()
+        assert crowd is not None
         return crowd
+
+    def reset(self,random_seed: int) -> Environment:
+        rand = np.random.default_rng(seed=random_seed)
+        crowd_builder = CrowdBuilder(rand)
+        robot_builder = RobotBuilder(rand)
+        obstacle_builder = ObstacleBuilder(rand)
+        obstacle_builder.build_table()
+        crowd_builder.build_crowd()
+        crowd_builder.build_groups()
+        robot_builder.build_robot()
+        return Environment(
+            obstacle_builder.obstacles,
+            crowd_builder.crowd,
+            crowd_builder.groups,
+            robot_builder.robot,
+        )

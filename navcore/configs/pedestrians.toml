@@ -20,3 +20,6 @@ randomize_pedestrian_v_pref = true
 [sensors]
 sensor_range = 10.0
 sensor_fov = 360.0
+
+[safety]
+safety_margin = 0.5
