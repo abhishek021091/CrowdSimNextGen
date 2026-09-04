@@ -8,7 +8,7 @@ mass = 20.0
 observable = false
 
 [kinematics]
-v_pref = 1
+v_pref = 0.3
 chassis = "holonomic"
 
 [policy]

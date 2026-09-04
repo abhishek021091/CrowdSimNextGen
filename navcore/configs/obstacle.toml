@@ -2,11 +2,18 @@
 # Obstacle Configuration file
 #==========================================================================
 
-[table]
-num_tables = 5
+[circular_table]
+num_tables = 2
 shape = "circular"
 radius = 0.5
 randomize_radius = true
 
 [boundary]
 gate = { enabled = true, num_gates = 2 }
+
+[rectangular_table]
+num_tables = 2
+shape = "rectangular"
+width = 1.0
+height = 1.0
+randomize_dimensions = true

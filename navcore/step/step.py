@@ -26,6 +26,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import tomllib
 
 import navcore.configs
@@ -36,16 +37,19 @@ from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.state import FullState, ObservableState
 from navcore.entities.components.velocity import Velocity
-from navcore.environment.environment import Environment
+from navcore.entities.environment.environment import Environment
 from navcore.middleware.orca_middleware import VelocityPlanner
 from navcore.missions.group_goal_reaching import GroupGoalReachingMission
-from navcore.missions.mission import Mission
+from navcore.step.collision_checker import CollisionChecker
 
 
 @dataclass(slots=True)
 class StepResult:
     robot_velocity: Velocity
+    robot_reached_goal: bool
     crowd_velocities: dict[int, Velocity]
+    pedestrian_reached_goals: dict[int, bool]
+    collision_happened: bool = False
 
 
 class Step:
@@ -82,6 +86,7 @@ class Step:
         robot_visible: bool,
         robot_mission: Mission | None = None,
         crowd_missions: Mapping[int, Mission] | None = None,
+        visibility: VisibilityPolicy | None = None,
     ) -> None:
         self.env = env
         self.robot = env.robot
@@ -90,11 +95,11 @@ class Step:
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
         self.crowd_missions: Mapping[int, Mission] = crowd_missions or {}
-        # Cached per pedestrian id, rebuilt only if that member's group
-        # instance changes (e.g. after a future split/merge) -- avoids
-        # reconstructing (and re-validating) a GroupGoalReachingMission
-        # for every group member on every single tick.
+        self.visibility = visibility
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
+        self.collision_checker = CollisionChecker(
+            self.env.robot, self.env.crowd, self.env.obstacles
+        )
 
     def step(self) -> StepResult:
         self._validate()
@@ -105,6 +110,7 @@ class Step:
         self._advance_agent(self.env.robot)
         for ped in self.env.crowd.values():
             self._advance_agent(ped)
+        result.collision_happened = self.collision_checker.check_collision()
 
         return result
 
@@ -156,8 +162,35 @@ class Step:
     def _compute_velocities(self) -> StepResult:
         robot_velocity = self._compute_robot_velocity()
         crowd_velocities = self._compute_crowd_velocities()
+        assert self.env.robot.pose is not None and self.env.robot.goal is not None
+        if (
+            np.linalg.norm(
+                [
+                    [
+                        self.env.robot.pose.px - self.env.robot.goal.gx,
+                        self.env.robot.pose.py - self.env.robot.goal.gy,
+                    ]
+                ]
+            )
+            <= 0.5
+        ):
+            robot_reached_goal = True
+        else:
+            robot_reached_goal = False
+        pedestrian_reached_goals = {}
+        for ped in self.env.crowd.values():
+            if (
+                np.linalg.norm([ped.pose.px - ped.goal.gx, ped.pose.py - ped.goal.gy])
+                > 0.5
+            ):
+                pedestrian_reached_goals[ped.id] = False
+            else:
+                pedestrian_reached_goals[ped.id] = True
         return StepResult(
-            robot_velocity=robot_velocity, crowd_velocities=crowd_velocities
+            robot_velocity=robot_velocity,
+            robot_reached_goal=robot_reached_goal,
+            pedestrian_reached_goals=pedestrian_reached_goals,
+            crowd_velocities=crowd_velocities,
         )
 
     def _compute_robot_velocity(self) -> Velocity:
@@ -165,6 +198,7 @@ class Step:
         robot_obs = self.env.robot.sensor.observe(
             self.env, robot_visible=self.robot_visible
         )
+        robot_obs = self._apply_visibility(self.env.robot, robot_obs)
         robot_obs[self.ROBOT_KEY] = self.env.robot.get_observable_state()
 
         target = self._target_for(
@@ -181,8 +215,12 @@ class Step:
         crowd_velocities: dict[int, Velocity] = {}
 
         for ped_id, ped in self.env.crowd.items():
+            if np.random.choice([True, False], p=[0.2, 0.8]) and ped_id % 10 == 0:
+                crowd_velocities[ped_id] = Velocity(0, 0)
+                continue  # Skip this pedestrian with 40% probability
             assert ped.sensor is not None
             ped_obs = ped.sensor.observe(self.env, robot_visible=self.robot_visible)
+            ped_obs = self._apply_visibility(ped, ped_obs)
             ped_obs[ped_id] = ped.get_observable_state()
 
             mission = self.crowd_missions.get(ped_id)
@@ -261,3 +299,38 @@ class Step:
                     )
                     self._group_missions[member_id] = mission
                 mission.set_goal()
+
+    def _agent_for_id(self, agent_id: int) -> Agent | None:
+        """Resolve an observation key back to its live agent.
+
+        ``ROBOT_KEY`` (-1) is the robot; any other id is looked up in
+        the crowd. Returns ``None`` for an id that no longer exists
+        (e.g. a pedestrian despawned since the observation was taken),
+        which callers treat as "can't verify, so don't filter it out."
+        """
+        if agent_id == self.ROBOT_KEY:
+            return self.env.robot
+        return self.env.crowd.get(agent_id)
+
+    def _apply_visibility(
+        self,
+        observer: Agent,
+        obs: dict[int, ObservableState],
+    ) -> dict[int, ObservableState]:
+        """Narrow a sensor's range-filtered observation using ``self.visibility``.
+
+        Sensor range answers "who's physically close enough to sense";
+        ``VisibilityPolicy`` answers "who's this observer's planner
+        allowed to react to" (group cohesion, robot/pedestrian
+        asymmetry, ...). The two are deliberately separate concerns --
+        see ``group_personal_space.py``'s module docstring.
+        """
+        if self.visibility is None:
+            return obs
+
+        visible: dict[int, ObservableState] = {}
+        for neighbor_id, state in obs.items():
+            neighbor = self._agent_for_id(neighbor_id)
+            if neighbor is None or self.visibility.is_visible(observer, neighbor):
+                visible[neighbor_id] = state
+        return visible

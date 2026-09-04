@@ -25,14 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from navcore.entities.agents.agent import Agent
+from navcore.entities.agents.pedestrians import Pedestrian
 from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.pose import Pose
 from navcore.entities.groups.group import Group
 
 #: Resolves an agent id to its live ``Agent`` instance.
-AgentLookup = Callable[[int], Agent]
+AgentLookup = Callable[[int], Pedestrian]
 
 
 class GroupGoalReachingMission:
@@ -60,11 +60,15 @@ class GroupGoalReachingMission:
                 f"agent_id={agent_id!r} is not a member of group {group.id!r}."
             )
         if formation_offset is None:
-            formation_offset = Vector2.zero()
+            formation_offset = Vector2(0.5, 0.5)
         self.agent_id = agent_id
         self.group = group
         self.agent_lookup = agent_lookup
         self.formation_offset = formation_offset
+
+    def set_group_id(self):
+        ped = self.agent_lookup(self.agent_id)
+        ped.group_id = self.group.id
 
     def set_position(self) -> None:
         if self.group.is_leader(self.agent_id):

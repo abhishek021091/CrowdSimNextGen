@@ -11,7 +11,7 @@ from navcore.entities.components.state import ObservableState
 if TYPE_CHECKING:
     from navcore.entities.agents.pedestrians import Pedestrian
     from navcore.entities.agents.robot import Robot
-    from navcore.environment.environment import Environment
+    from navcore.entities.environment.environment import Environment
 
 
 class Sensor(ABC):
@@ -43,14 +43,16 @@ class RangeSensor(Sensor):
 
         observation: dict[int, ObservableState] = {}
 
-        for i, pedestrian in enumerate(environment.crowd.values()):
+        for pedestrian_id, pedestrian in environment.crowd.items():
+            if pedestrian is observer:
+                continue
             assert pedestrian.pose is not None
             distance = hypot(
                 pedestrian.pose.px - observer.pose.px,
                 pedestrian.pose.py - observer.pose.py,
             )
             if distance <= self.range:
-                observation[i] = pedestrian.get_observable_state()
+                observation[pedestrian_id] = pedestrian.get_observable_state()
 
         if isinstance(self.agent, Pedestrian) and robot_visible:
             observation[-1] = environment.robot.get_observable_state()
