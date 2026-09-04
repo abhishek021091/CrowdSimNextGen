@@ -1,33 +1,38 @@
+"""SweepingMission: lawnmower-style coverage mission for the robot."""
+
+from __future__ import annotations
+
 import numpy as np
-from navcore.entities.components.goal import Goal
+
 from navcore.entities.environment.environment import Environment
-from dataclasses import dataclass
-
-
-@dataclass
-class Sweep:
-    started: bool = False
-    area_swept: float = 0.0
-    collisions: int = 0
-    sweeping: bool = False
-    avoiding_obstacle: bool = False
 
 
 class SweepingMission:
+    """Lawnmower-style coverage mission for the robot.
+
+    Drives the robot from its current position to the nearest arena
+    corner, then sweeps back and forth in parallel lanes (perpendicular
+    to ``sweep_axes``) until the far wall is reached.
+
+    All mission progress (``started``, ``sweeping``, ``collisions``,
+    ``area_swept``, ``avoiding_obstacle``, ``sweep_finished``) lives on
+    the instance, not on a shared class -- see prior revision notes for
+    why that matters.
+    """
+
     def __init__(
         self,
         env: Environment,
         robot_sweep_axes: str = "random",
         robot_sweep_margin: float = 0.0,
-        robot_sweep_step: float = 0.1,
+        robot_sweep_step: float = 5,
         robot_sweep_lane_step: float | None = None,
-        random_seed: int = 42,
+        random_seed: int | None = None,
     ):
         self.env = env
         self.robot_sweep_axes = robot_sweep_axes
         self.robot_sweep_margin = robot_sweep_margin
         self.robot_sweep_step = robot_sweep_step
-        random_seed = self.env.info.random_seed
         # Default lane spacing: one robot diameter, so consecutive lanes
         # don't overlap or leave gaps.
         self.robot_sweep_lane_step = (
@@ -35,117 +40,142 @@ class SweepingMission:
             if robot_sweep_lane_step is not None
             else self.env.robot.radius * 2
         )
-        self.rand = np.random.default_rng(seed=random_seed)
+        seed = random_seed if random_seed is not None else self.env.info.random_seed
+        self.rand = np.random.default_rng(seed=seed)
 
         self.sweep_dir: int = 1
         self.sweep_axes: int = 0
         self.sweep_start: tuple[float, float] = (0.0, 0.0)
-        self.sweep_stop: Goal | None = None
+        self.sweep_stop: tuple[float, float] | None = None
         self.sweep_finished: bool = False
 
-    def reach_closest_corner(self):
+        self.started: bool = False
+        self.sweeping: bool = False
+        self.collisions: int = 0
+        self.area_swept: float = 0.0
+        self.avoiding_obstacle: bool = False
+
+    def reach_closest_corner(self) -> None:
         # Move the robot to the corner of the environment
         px = self.env.robot.pose.px
         py = self.env.robot.pose.py
-        gx = np.sign(px) * (self.env.info.arena_width / 2 - self.robot_sweep_margin)
-        gy = np.sign(py) * (self.env.info.arena_height / 2 - self.robot_sweep_margin)
+        half_width = self.env.info.arena_width / 2
+        half_height = self.env.info.arena_height / 2
+        gx = np.sign(px) * (half_width - self.robot_sweep_margin)
+        gy = np.sign(py) * (half_height - self.robot_sweep_margin)
         sweep_start = (gx, gy)
-        self.sweep_start = (gx, gy)
+        self.sweep_start = sweep_start
 
         if self.robot_sweep_axes == "random":
-            sweep_axes = self.rand.integers(0, 2)
+            sweep_axes = int(self.rand.integers(0, 2))
         else:
             sweep_axes = self.robot_sweep_axes
         self.sweep_axes = sweep_axes
 
         if sweep_axes == 0:
             self.sweep_dir = -1 if gx > 0 else 1
-            total_lanes_required = (self.env.info.arena_width) / (
+            total_lanes_required = self.env.info.arena_width / (
                 self.env.robot.radius * 2
             )
-            if total_lanes_required % 2 == 0:
-                self.sweep_stop = (gx, -gy)
-            else:
-                self.sweep_stop = (-gx, -gy)
+            self.sweep_stop = (gx, -gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
         else:
             self.sweep_dir = -1 if gy > 0 else 1
-            total_lanes_required = (self.env.info.arena_height) / (
+            total_lanes_required = self.env.info.arena_height / (
                 self.env.robot.radius * 2
             )
-            if total_lanes_required % 2 == 0:
-                self.sweep_stop = (-gx, gy)
-            else:
-                self.sweep_stop = (-gx, -gy)
+            self.sweep_stop = (-gx, gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
 
         self.env.robot.set_goal_position(sweep_start)
-        Sweep.started = True
-        Sweep.sweeping = True
+        self.started = True
 
-    def update_sweep(self):
+    def update_sweep(self) -> None:
         """Advance the robot's sweep goal by one step (lawnmower pattern).
 
         Call this once per tick after ``reach_closest_corner`` has been
         called once to establish ``sweep_start``/``sweep_stop``/``sweep_dir``.
         Mutates ``self.env.robot.goal`` in place; sets ``self.sweep_finished``
-        to True once the far wall is reached on the perpendicular axis.
+        to True once the far wall is reached on the cross axis.
+
+        Design note -- why this is axis-agnostic instead of two branches:
+            A previous version duplicated this logic once per axis. The
+            y-axis copy's lane-shift direction was hardcoded instead of
+            depending on the sweep's starting quadrant (unlike the
+            x-axis copy, which correctly varied it via
+            ``sweep_start[1] > 0``), so sweeps along the y-axis shifted
+            lanes the wrong way and finished early, well short of full
+            coverage -- the same class of bug as the known
+            ``BoustrophedonPlanner`` coverage issue. Expressing the step
+            once, parameterized by which coordinate is "primary" (the
+            one advancing every tick) vs. "cross" (the one that shifts
+            by a lane on each turn), makes that kind of axis-specific
+            drift structurally impossible: there is only one
+            implementation for both axes to share.
         """
-        width = self.env.configs["arenaSize"]["width"]
-        height = self.env.configs["arenaSize"]["height"]
+        half_width = self.env.info.arena_width / 2
+        half_height = self.env.info.arena_height / 2
         margin = self.robot_sweep_margin
         lane_step = self.robot_sweep_lane_step
 
         goal = self.env.robot.goal
-        gx, gy = goal.gx, goal.gy
 
-        if self.sweep_axes == 0:  # x-axis sweep
-            gx = goal.gx + self.sweep_dir * self.robot_sweep_step
+        if self.sweep_axes == 0:
+            primary_pos, cross_pos = goal.gx, goal.gy
+            primary_bound, cross_bound = half_width, half_height
+            # Which quadrant the sweep started in decides which way
+            # lanes shift on each turn.
+            shift_positive = self.sweep_start[1] > 0
+        else:
+            primary_pos, cross_pos = goal.gy, goal.gx
+            primary_bound, cross_bound = half_height, half_width
+            shift_positive = self.sweep_start[0] > 0
 
-            if gx > width - margin:  # right wall
-                if goal.gx != width - margin:
-                    gx = width - margin
-                else:
-                    gx = goal.gx
-                    gy += -lane_step if self.sweep_start[1] > 0 else lane_step
-                    self.sweep_dir = -1
-            elif gx < -width + margin:  # left wall
-                if goal.gx != -width + margin:
-                    gx = -width + margin
-                else:
-                    gx = goal.gx
-                    gy += -lane_step if self.sweep_start[1] > 0 else lane_step
-                    self.sweep_dir = 1
+        primary_pos = self._step_primary(
+            primary_pos, primary_bound, margin, shift_positive, lane_step
+        )
+        if self._turned_this_call:
+            cross_pos += -lane_step if shift_positive else lane_step
 
-            if gy > height - margin:
-                gy = height - margin
-                self.sweep_finished = True
-            elif gy < -height + margin:
-                gy = -height + margin
-                self.sweep_finished = True
+        if cross_pos > cross_bound - margin:
+            cross_pos = cross_bound - margin
+            self.sweep_finished = True
+        elif cross_pos < -cross_bound + margin:
+            cross_pos = -cross_bound + margin
+            self.sweep_finished = True
 
-        else:  # y-axis sweep
-            gy = goal.gy + self.sweep_dir * self.robot_sweep_step
+        if self.sweep_axes == 0:
+            goal.gx, goal.gy = primary_pos, cross_pos
+        else:
+            goal.gy, goal.gx = primary_pos, cross_pos
 
-            if gy > height - margin:  # top wall
-                if goal.gy != height - margin:
-                    gy = height - margin
-                else:
-                    gy = goal.gy
-                    gx += -lane_step if np.sign(gx) == 1 else lane_step
-                    self.sweep_dir = -1
-            elif gy < -height + margin:  # bottom wall
-                if goal.gy != -height + margin:
-                    gy = -height + margin
-                else:
-                    gy = goal.gy
-                    gx += -lane_step if np.sign(gx) == 1 else lane_step
-                    self.sweep_dir = 1
+    def _step_primary(
+        self,
+        primary_pos: float,
+        bound: float,
+        margin: float,
+        shift_positive: bool,
+        lane_step: float,
+    ) -> float:
+        """Advance the primary-axis coordinate by one step, or turn.
 
-            if gx > width - margin:
-                gx = width - margin
-                self.sweep_finished = True
-            elif gx < -width + margin:
-                gx = -width + margin
-                self.sweep_finished = True
+        Sets ``self._turned_this_call`` so the caller knows whether to
+        also shift the cross-axis coordinate this tick.
+        """
+        self._turned_this_call = False
+        next_pos = primary_pos + self.sweep_dir * self.robot_sweep_step
 
-        self.env.robot.goal.gx = gx
-        self.env.robot.goal.gy = gy
+        if next_pos > bound - margin:
+            if primary_pos != bound - margin:
+                next_pos = bound - margin
+            else:
+                next_pos = primary_pos
+                self.sweep_dir = -1
+                self._turned_this_call = True
+        elif next_pos < -bound + margin:
+            if primary_pos != -bound + margin:
+                next_pos = -bound + margin
+            else:
+                next_pos = primary_pos
+                self.sweep_dir = 1
+                self._turned_this_call = True
+
+        return next_pos

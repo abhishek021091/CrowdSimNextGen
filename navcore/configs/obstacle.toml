@@ -3,16 +3,16 @@
 #==========================================================================
 
 [circular_table]
-num_tables = 2
+num_tables = 0
 shape = "circular"
 radius = 0.5
 randomize_radius = true
 
 [boundary]
-gate = { enabled = true, num_gates = 2 }
+gate = { enabled = false, num_gates = 2 }
 
 [rectangular_table]
-num_tables = 2
+num_tables = 0
 shape = "rectangular"
 width = 1.0
 height = 1.0
