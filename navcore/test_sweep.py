@@ -1,4 +1,5 @@
 from navcore.builder.environment_builder import EnvironmentBuilder
+from navcore.collision_predictor.sat import SAT
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
 from navcore.missions.sweeping import SweepingMission
 from navcore.step.step import Step
@@ -56,23 +57,44 @@ class SweepTest:
                     mission.sweeping = True
                 mission.update_sweep()
 
+            self.robot_observation = self.env.robot.sensor.observe(
+                self.env, robot_visible=False
+            )
+            collision_predictor = SAT(
+                self.robot_observation, self.env.robot, self.env.obstacles
+            ).checkIntrusionSAT()
+            if collision_predictor and not mission.avoiding_obstacle:
+                mission.avoiding_obstacle = True
+                last_pose = self.env.robot.pose
+                last_goal = self.env.robot.goal
+            elif not collision_predictor and not mission.avoiding_obstacle:
+                self.env.robot.set_goal_position(last_pose)
+            else:
+                distance_to_last_pose = np.linalg.norm(
+                    [
+                        self.env.robot.pose.px - last_pose.px,
+                        self.env.robot.pose.py - last_pose.py,
+                    ]
+                )
+                if distance_to_last_pose < 0.1:
+                    mission.avoiding_obstacle = False
+                    self.env.robot.set_goal_position(last_goal)
+
             if mission.sweep_finished:
                 print("Sweep mission completed!")
-                break
+            if self.env.did_collision_happened():
+                print(f"Total collisions: {self.env.info.collision_counter}")
 
-            if result.collision_happened:
-                mission.collisions += 1
+            area_swept = mission.total_area_swept()
+            print(f"Area swept so far: {area_swept:.2f} m^2")
 
             for ped_id, reached in result.pedestrian_reached_goals.items():
                 if reached:
-                    print(f"Pedestrian {ped_id} reached its goal!")
                     self.env_builder.rebuild_pedestrian(
                         ped_id=ped_id,
                         env=self.env,
                         random_seed=self.env.info.random_seed + count + ped_id,
                     )
-
-            print(self.env.robot.pose, self.env.robot.goal)
 
 
 if __name__ == "__main__":

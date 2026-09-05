@@ -22,7 +22,6 @@ rather than written onto agent.goal:
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,17 +29,15 @@ import numpy as np
 import tomllib
 
 import navcore.configs
+
+# from navcore.collision_detector.sat import SAT
 from navcore.entities.agents.agent import Agent
-from navcore.entities.agents.pedestrians import Pedestrian
-from navcore.entities.agents.robot import Robot
-from navcore.entities.components.geometry.vector2 import Vector2
-from navcore.entities.components.goal import Goal
-from navcore.entities.components.state import FullState, ObservableState
+from navcore.entities.components.state import ObservableState
 from navcore.entities.components.velocity import Velocity
 from navcore.entities.environment.environment import Environment
 from navcore.middleware.orca_middleware import VelocityPlanner
 from navcore.missions.group_goal_reaching import GroupGoalReachingMission
-from navcore.step.collision_checker import CollisionChecker
+from navcore.missions.mission import Mission
 
 
 @dataclass(slots=True)
@@ -49,7 +46,6 @@ class StepResult:
     robot_reached_goal: bool
     crowd_velocities: dict[int, Velocity]
     pedestrian_reached_goals: dict[int, bool]
-    collision_happened: bool = False
 
 
 class Step:
@@ -85,8 +81,6 @@ class Step:
         env: Environment,
         robot_visible: bool,
         robot_mission: Mission | None = None,
-        crowd_missions: Mapping[int, Mission] | None = None,
-        visibility: VisibilityPolicy | None = None,
     ) -> None:
         self.env = env
         self.robot = env.robot
@@ -94,12 +88,14 @@ class Step:
         self.planner = planner
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
-        self.crowd_missions: Mapping[int, Mission] = crowd_missions or {}
-        self.visibility = visibility
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
-        self.collision_checker = CollisionChecker(
-            self.env.robot, self.env.crowd, self.env.obstacles
-        )
+
+    def get_observations(self, agent: Agent) -> dict[int, ObservableState]:
+        """Return the agent's sensor observation, filtered by visibility."""
+        if agent.sensor is None:
+            raise RuntimeError("Agent sensor is not initialized.")
+        obs = agent.sensor.observe(self.env, robot_visible=self.robot_visible)
+        return obs
 
     def step(self) -> StepResult:
         self._validate()
@@ -110,7 +106,6 @@ class Step:
         self._advance_agent(self.env.robot)
         for ped in self.env.crowd.values():
             self._advance_agent(ped)
-        result.collision_happened = self.collision_checker.check_collision()
 
         return result
 
@@ -131,31 +126,6 @@ class Step:
                 )
             if ped.sensor is None:
                 raise RuntimeError(f"Pedestrian {ped.id} sensor must be initialized.")
-
-    # -- Mission -> FullState plumbing --------------------------------
-
-    def _target_for(
-        self,
-        agent: Agent,
-        mission: Mission | None,
-        neighbors: Sequence[ObservableState],
-    ) -> Vector2:
-        """Return this tick's target: mission-derived, or the agent's own goal."""
-        if mission is not None:
-            return mission.get_target(agent, neighbors)
-        assert agent.goal is not None  # guaranteed by _validate()
-        return Vector2(agent.goal.gx, agent.goal.gy)
-
-    def _full_state_for(self, agent: Agent, target: Vector2) -> FullState:
-        """Build a planning-only FullState with ``target`` standing in for goal."""
-        assert agent.pose is not None and agent.velocity is not None
-        return FullState(
-            pose=agent.pose,
-            goal=Goal(target.x, target.y),
-            velocity=agent.velocity,
-            radius=agent.radius,
-            preferred_speed=agent.v_pref,
-        )
 
     # -- velocity computation -------------------------------------------
 
@@ -195,16 +165,13 @@ class Step:
 
     def _compute_robot_velocity(self) -> Velocity:
         assert self.env.robot.sensor is not None
-        robot_obs = self.env.robot.sensor.observe(
-            self.env, robot_visible=self.robot_visible
-        )
-        robot_obs = self._apply_visibility(self.env.robot, robot_obs)
-        robot_obs[self.ROBOT_KEY] = self.env.robot.get_observable_state()
+        robot_obs = self.get_observations(self.env.robot)
 
-        target = self._target_for(
-            self.env.robot, self.robot_mission, list(robot_obs.values())
-        )
-        full_state = self._full_state_for(self.env.robot, target)
+        # target = self._target_for(
+        #     self.env.robot, self.robot_mission, list(robot_obs.values())
+        # )
+        # full_state = self._full_state_for(self.env.robot, target)
+        full_state = self.env.robot.get_full_state()
 
         robot_velocity, _ = self.planner.compute_velocities(
             self.ROBOT_KEY, full_state, robot_obs
@@ -219,13 +186,12 @@ class Step:
                 crowd_velocities[ped_id] = Velocity(0, 0)
                 continue  # Skip this pedestrian with 40% probability
             assert ped.sensor is not None
-            ped_obs = ped.sensor.observe(self.env, robot_visible=self.robot_visible)
-            ped_obs = self._apply_visibility(ped, ped_obs)
+            ped_obs = self.get_observations(ped)
             ped_obs[ped_id] = ped.get_observable_state()
 
-            mission = self.crowd_missions.get(ped_id)
-            target = self._target_for(ped, mission, list(ped_obs.values()))
-            full_state = self._full_state_for(ped, target)
+            # mission = self.crowd_missions.get(ped_id)
+            # target = self._target_for(ped, mission, list(ped_obs.values()))
+            full_state = self.env.crowd[ped_id].get_full_state()
 
             ped_velocity, _ = self.planner.compute_velocities(
                 ped_id, full_state, ped_obs
@@ -262,7 +228,7 @@ class Step:
 
     def _apply_robot_velocity(
         self,
-        robot: Robot,
+        robot: Agent,
         velocities: dict[int, Velocity],
     ) -> Velocity:
         if self.ROBOT_KEY not in velocities:
@@ -272,7 +238,7 @@ class Step:
 
     def _apply_crowd_velocities(
         self,
-        crowd: list[Pedestrian],
+        crowd: list[Agent],
         velocities: dict[int, Velocity],
     ) -> dict[int, Velocity]:
         crowd_velocities: dict[int, Velocity] = {}
@@ -311,26 +277,3 @@ class Step:
         if agent_id == self.ROBOT_KEY:
             return self.env.robot
         return self.env.crowd.get(agent_id)
-
-    def _apply_visibility(
-        self,
-        observer: Agent,
-        obs: dict[int, ObservableState],
-    ) -> dict[int, ObservableState]:
-        """Narrow a sensor's range-filtered observation using ``self.visibility``.
-
-        Sensor range answers "who's physically close enough to sense";
-        ``VisibilityPolicy`` answers "who's this observer's planner
-        allowed to react to" (group cohesion, robot/pedestrian
-        asymmetry, ...). The two are deliberately separate concerns --
-        see ``group_personal_space.py``'s module docstring.
-        """
-        if self.visibility is None:
-            return obs
-
-        visible: dict[int, ObservableState] = {}
-        for neighbor_id, state in obs.items():
-            neighbor = self._agent_for_id(neighbor_id)
-            if neighbor is None or self.visibility.is_visible(observer, neighbor):
-                visible[neighbor_id] = state
-        return visible

@@ -3,6 +3,8 @@ from matplotlib.patches import Circle
 from navcore.entities.environment.environment import Environment
 import numpy as np
 
+from navcore.missions import sweeping
+
 
 class RobotVisualizer:
     def __init__(self, environment: Environment, ax):

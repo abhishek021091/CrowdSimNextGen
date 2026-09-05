@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from navcore.entities.components.goal import Goal
+from navcore.entities.components.pose import Pose
 from navcore.entities.environment.environment import Environment
 
 
@@ -24,14 +26,18 @@ class SweepingMission:
         self,
         env: Environment,
         robot_sweep_axes: str = "random",
-        robot_sweep_margin: float = 0.0,
         robot_sweep_step: float = 5,
         robot_sweep_lane_step: float | None = None,
         random_seed: int | None = None,
+        robot_sweep_margin: float | None = None,
     ):
         self.env = env
         self.robot_sweep_axes = robot_sweep_axes
-        self.robot_sweep_margin = robot_sweep_margin
+        self.robot_sweep_margin = (
+            robot_sweep_margin
+            if robot_sweep_margin is not None
+            else self.env.robot.radius
+        )
         self.robot_sweep_step = robot_sweep_step
         # Default lane spacing: one robot diameter, so consecutive lanes
         # don't overlap or leave gaps.
@@ -54,38 +60,45 @@ class SweepingMission:
         self.collisions: int = 0
         self.area_swept: float = 0.0
         self.avoiding_obstacle: bool = False
+        self._lanes_completed: int = 0
+        self._lane_start_primary_pos: float = 0.0
 
     def reach_closest_corner(self) -> None:
         # Move the robot to the corner of the environment
+        assert self.env.robot.pose is not None
         px = self.env.robot.pose.px
         py = self.env.robot.pose.py
-        half_width = self.env.info.arena_width / 2
-        half_height = self.env.info.arena_height / 2
+        half_width = float(self.env.info.arena_width) / 2
+        half_height = float(self.env.info.arena_height) / 2
         gx = np.sign(px) * (half_width - self.robot_sweep_margin)
         gy = np.sign(py) * (half_height - self.robot_sweep_margin)
-        sweep_start = (gx, gy)
-        self.sweep_start = sweep_start
+        sweep_start_pose = Goal(gx, gy)
+        self.sweep_start_pose = sweep_start_pose
 
         if self.robot_sweep_axes == "random":
             sweep_axes = int(self.rand.integers(0, 2))
         else:
+            assert self.robot_sweep_axes in (0, 1)
             sweep_axes = self.robot_sweep_axes
         self.sweep_axes = sweep_axes
 
         if sweep_axes == 0:
             self.sweep_dir = -1 if gx > 0 else 1
-            total_lanes_required = self.env.info.arena_width / (
+            total_lanes_required = float(self.env.info.arena_width) / (
                 self.env.robot.radius * 2
             )
             self.sweep_stop = (gx, -gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
         else:
             self.sweep_dir = -1 if gy > 0 else 1
-            total_lanes_required = self.env.info.arena_height / (
+            total_lanes_required = float(self.env.info.arena_height) / (
                 self.env.robot.radius * 2
             )
             self.sweep_stop = (-gx, gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
 
-        self.env.robot.set_goal_position(sweep_start)
+        self.env.robot.set_goal_position(sweep_start_pose)
+        self._lane_start_primary_pos = (
+            sweep_start_pose.gx if sweep_axes == 0 else sweep_start_pose.gy
+        )
         self.started = True
 
     def update_sweep(self) -> None:
@@ -111,20 +124,22 @@ class SweepingMission:
             drift structurally impossible: there is only one
             implementation for both axes to share.
         """
-        half_width = self.env.info.arena_width / 2
-        half_height = self.env.info.arena_height / 2
+        half_width = float(self.env.info.arena_width) / 2
+        half_height = float(self.env.info.arena_height) / 2
         margin = self.robot_sweep_margin
         lane_step = self.robot_sweep_lane_step
 
         goal = self.env.robot.goal
 
         if self.sweep_axes == 0:
+            assert goal is not None
             primary_pos, cross_pos = goal.gx, goal.gy
             primary_bound, cross_bound = half_width, half_height
             # Which quadrant the sweep started in decides which way
             # lanes shift on each turn.
             shift_positive = self.sweep_start[1] > 0
         else:
+            assert goal is not None
             primary_pos, cross_pos = goal.gy, goal.gx
             primary_bound, cross_bound = half_height, half_width
             shift_positive = self.sweep_start[0] > 0
@@ -178,4 +193,39 @@ class SweepingMission:
                 self.sweep_dir = 1
                 self._turned_this_call = True
 
+        if self._turned_this_call:
+            self._lanes_completed += 1
+            self._lane_start_primary_pos = next_pos
+
         return next_pos
+
+    def total_area_swept(self) -> float:
+        """Return the area swept so far, in square meters.
+
+        Derived from completed lanes plus real progress into the current
+        lane -- never from distance to a goal the robot hasn't reached
+        yet. A tick-by-tick accumulator keyed on pose-to-goal distance
+        would credit area for ground the robot is only *about* to cover,
+        which overcounts the moment a lane is aborted (avoidance detour,
+        collision, early stop). This is deterministic and can't drift.
+        """
+        arena_length = (
+            float(self.env.info.arena_height)
+            if self.sweep_axes == 0
+            else float(self.env.info.arena_width)
+        )
+        lane_width = self.robot_sweep_lane_step
+
+        pose = self.env.robot.pose
+        current_primary_pos: float = self._lane_start_primary_pos
+        if pose is not None:
+            current_primary_pos = pose.px if self.sweep_axes == 0 else pose.py
+
+        partial_lane_length: float = abs(
+            current_primary_pos - self._lane_start_primary_pos
+        )
+        self.area_swept: float = (
+            self._lanes_completed * lane_width * arena_length
+            + lane_width * partial_lane_length
+        )
+        return self.area_swept

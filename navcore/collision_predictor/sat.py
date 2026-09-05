@@ -1,3 +1,11 @@
+"""SAT: circle-vs-polygon obstacle collision + directional-corridor agent intrusion check.
+
+See module-level architecture note in the class docstrings below for why
+``checkIntrusionSAT`` may want to move to ``intrusion.py`` -- it performs
+a directional swept-corridor test, not a Separating Axis Theorem test,
+despite living in this file today.
+"""
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import hypot
@@ -6,18 +14,31 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from navcore.entities.agents.pedestrians import Pedestrian
-from navcore.entities.agents.robot import Robot
+from navcore.entities.agents.agent import Agent
 from navcore.entities.components.state import ObservableState
 from navcore.entities.obstacles import Obstacle
 from navcore.policies.base_orca_planner import obstacle_to_vertices
 
 
 class SAT:
+    """Checks one agent for collision against its neighbors and static obstacles.
+
+    Attributes:
+        obs: This agent's currently-visible neighbors, keyed by id.
+        agent: The agent being checked (robot or pedestrian).
+        obstacles: This episode's static obstacles.
+    """
+
+    # TODO: source from config (e.g. agent.config["safety"]) rather than
+    # a hardcoded constant -- see project convention of config-driven
+    # tunables (env.toml / pedestrians.toml / robot.toml).
+    TIME_HORIZON = 7.0
+    _EPS = 1e-8
+
     def __init__(
         self,
         obs: dict[int, ObservableState],
-        agent: Robot | Pedestrian,
+        agent: Agent,
         obstacles: dict[str, Obstacle],
     ) -> None:
         self.obs = obs
@@ -25,15 +46,19 @@ class SAT:
         self.obstacles = obstacles
 
     def _check_collision(self) -> bool:
+        """Return whether ``agent`` collides with a neighbor or an obstacle.
+
+        Raises:
+            RuntimeError: If ``agent`` has no pose or velocity set.
+        """
         if self.agent.pose is None:
             raise RuntimeError("Agent pose is missing.")
         if self.agent.velocity is None:
             raise RuntimeError("Agent velocity is missing.")
 
         collision_detected = self.checkIntrusionSAT()
-        obstacle_collision_detector = ObstacleCollisionDetector()
         obstacle_collision_detected = (
-            obstacle_collision_detector.collides_with_any_obstacle(
+            ObstacleCollisionDetector.collides_with_any_obstacle(
                 self.agent, self.obstacles
             ).collided
         )
@@ -41,9 +66,19 @@ class SAT:
         return collision_detected or obstacle_collision_detected
 
     def checkIntrusionSAT(self) -> bool:
-        TIME_HORIZON = 7.0
-        EPS = 1e-8
+        """Return whether any neighbor enters ``agent``'s swept safety corridor.
 
+        Projects each neighbor's relative position/velocity onto the
+        agent's heading and its perpendicular, then solves for the time
+        interval during which the neighbor is within ``safe_dist`` of
+        the agent along both axes. A collision is flagged if that
+        interval is non-empty and starts within ``TIME_HORIZON``.
+
+        Returns:
+            ``True`` if any neighbor is predicted to intrude within the
+            time horizon (or is already within ``safe_dist``, for a
+            stationary agent). ``False`` if there are no neighbors.
+        """
         assert self.agent.pose is not None
         assert self.agent.velocity is not None
         agent_pos = np.array(
@@ -72,12 +107,17 @@ class SAT:
         safe_dist = (
             self.agent.radius
             + obs_radius
-            + float(self.agent.config["safety"]["margin"])
+            + float(self.agent.config["safety"]["safety_margin"])
         )
 
         agent_speed = np.linalg.norm(agent_vel)
-        if agent_speed <= EPS:
-            # Fallback for stationary agent: direct overlap / clearance check.
+        if agent_speed <= self._EPS:
+            # Fallback for a stationary agent: direct overlap/clearance
+            # check only (t=0). Note this does NOT predict a moving
+            # neighbor closing in over TIME_HORIZON -- that's CPA's
+            # job (cpa.py) if this agent is meant to react preemptively
+            # while stationary; confirm whether SATCPACollisionDetector
+            # already covers that case before relying on this alone.
             dist = np.linalg.norm(obs_pos - agent_pos, axis=1)
             return bool((dist <= safe_dist).any())
 
@@ -96,10 +136,14 @@ class SAT:
         entry_x, exit_x = self.sat_interval(proj_x, rel_vel_x, safe_dist)
         entry_y, exit_y = self.sat_interval(proj_y, rel_vel_y, safe_dist)
 
-        entry = np.maximum(entry_x, entry_y)
-        exit = np.minimum(exit_x, exit_y)
+        entry_time = np.maximum(entry_x, entry_y)
+        exit_time = np.minimum(exit_x, exit_y)
 
-        collision = (entry <= exit) & (exit >= 0.0) & (entry <= TIME_HORIZON)
+        collision = (
+            (entry_time <= exit_time)
+            & (exit_time >= 0.0)
+            & (entry_time <= self.TIME_HORIZON)
+        )
         return bool(collision.any())
 
     def sat_interval(
@@ -108,29 +152,55 @@ class SAT:
         relative_velocity: NDArray[np.float64],
         safe_dist: NDArray[np.float64],
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        EPS = 1e-8
+        """Return the ``[entry, exit]`` time interval of overlap along one axis.
 
+        Args:
+            center_projection: Each neighbor's relative position,
+                projected onto this axis.
+            relative_velocity: Each neighbor's relative velocity,
+                projected onto this axis.
+            safe_dist: Each neighbor's combined safety distance.
+
+        Returns:
+            Per-neighbor ``(entry, exit)`` arrays. For a neighbor with
+            near-zero relative velocity on this axis, the interval is
+            ``(-inf, inf)`` if already within ``safe_dist``, else
+            ``(inf, -inf)`` (an empty interval).
+        """
         entry = np.empty_like(center_projection, dtype=np.float64)
-        exit = np.empty_like(center_projection, dtype=np.float64)
+        exit_time = np.empty_like(center_projection, dtype=np.float64)
 
-        moving = np.abs(relative_velocity) > EPS
+        moving = np.abs(relative_velocity) > self._EPS
 
         t1 = (-safe_dist - center_projection) / relative_velocity
         t2 = (safe_dist - center_projection) / relative_velocity
 
         entry[moving] = np.minimum(t1[moving], t2[moving])
-        exit[moving] = np.maximum(t1[moving], t2[moving])
+        exit_time[moving] = np.maximum(t1[moving], t2[moving])
 
         inside = np.abs(center_projection) <= safe_dist
 
         entry[~moving] = np.where(inside[~moving], -np.inf, np.inf)
-        exit[~moving] = np.where(inside[~moving], np.inf, -np.inf)
+        exit_time[~moving] = np.where(inside[~moving], np.inf, -np.inf)
 
-        return entry, exit
+        return entry, exit_time
 
 
 @dataclass(slots=True)
 class CollisionResult:
+    """Outcome of a circle-vs-obstacle SAT test.
+
+    Attributes:
+        collided: Whether the circle overlaps the tested obstacle(s).
+        obstacle_index: Index (into the iteration order passed to
+            ``collides_with_any_obstacle``) of the colliding obstacle,
+            or the closest non-colliding one if ``collided`` is False.
+        overlap: Minimum penetration depth along the best separating
+            axis found, in world units.
+        axis_x: X component of that axis (unit vector).
+        axis_y: Y component of that axis (unit vector).
+    """
+
     collided: bool
     obstacle_index: int | None = None
     overlap: float = 0.0
@@ -140,8 +210,19 @@ class CollisionResult:
 
 class ObstacleCollisionDetector:
     """SAT-based collision detector for a circular agent against obstacles.
-    Obstacles can be polygon, rectangle, or circle shapes as long as they
-    are accepted by `obstacle_to_vertices(...)`.
+
+    Obstacles can be polygon, rectangle, or circle shapes, as long as
+    they are accepted by ``obstacle_to_vertices(...)``. Stateless --
+    every method is a ``@classmethod``/``@staticmethod``; there is no
+    need to construct an instance.
+
+    Known caveat: ``obstacle_to_vertices`` currently returns
+    local-origin (not world-translated) vertices for ``Rectangle``
+    geometry, so rectangular obstacles placed away from ``(0, 0)`` are
+    checked at the wrong position. See module docstring / review notes;
+    fix belongs in ``base_orca_planner.obstacle_to_vertices``, not here,
+    to avoid duplicating the same workaround ``containment.py`` already
+    applies for point-containment.
     """
 
     EPS = 1e-12
@@ -149,9 +230,26 @@ class ObstacleCollisionDetector:
     @classmethod
     def collides_with_any_obstacle(
         cls,
-        agent: Robot | Pedestrian,
+        agent: Agent,
         obstacles: Sequence[Obstacle] | dict[Any, Obstacle],
     ) -> CollisionResult:
+        """Return the collision result against the first colliding obstacle.
+
+        Args:
+            agent: The agent to test, as a circle at ``agent.pose`` with
+                radius ``agent.radius``.
+            obstacles: The obstacles to test against, as a sequence or a
+                ``dict`` (iterated by value).
+
+        Returns:
+            The first ``CollisionResult`` with ``collided=True``
+            encountered, short-circuiting further obstacles. If none
+            collide, returns the closest non-colliding result (smallest
+            positive separation) seen.
+
+        Raises:
+            ValueError: If ``agent.pose`` or ``agent.radius`` is missing.
+        """
         if agent.pose is None:
             raise ValueError("Agent pose is None.")
         if getattr(agent, "radius", None) is None:
@@ -188,6 +286,22 @@ class ObstacleCollisionDetector:
         circle: tuple[float, float, float],
         polygon: Sequence[tuple[float, float]],
     ) -> CollisionResult:
+        """Run SAT between a circle and a convex polygon.
+
+        Tests every polygon edge normal, plus the axis from the circle
+        center to the closest polygon point (needed because a circle
+        has no edges of its own to contribute candidate axes).
+
+        Args:
+            circle: ``(center_x, center_y, radius)``.
+            polygon: Convex polygon vertices, in order, world coordinates.
+
+        Returns:
+            A ``CollisionResult``. ``collided=True`` with the minimum
+            penetration depth and its axis if every tested axis shows
+            overlap; ``collided=False`` (with ``overlap=0.0``) as soon
+            as a separating axis is found.
+        """
         cx, cy, _ = circle
 
         if not polygon:
@@ -239,6 +353,11 @@ class ObstacleCollisionDetector:
         axis_x: float,
         axis_y: float,
     ) -> float:
+        """Return the signed overlap of ``circle`` and ``polygon`` on one axis.
+
+        Positive means the projected intervals overlap by that amount;
+        zero or negative means this axis separates them.
+        """
         cx, cy, cr = circle
 
         circle_center_proj = cx * axis_x + cy * axis_y
@@ -257,6 +376,7 @@ class ObstacleCollisionDetector:
         py: float,
         polygon: Sequence[tuple[float, float]],
     ) -> tuple[float, float]:
+        """Return the point on ``polygon``'s boundary closest to ``(px, py)``."""
         best_dist = float("inf")
         best_point = polygon[0]
 
@@ -282,6 +402,7 @@ class ObstacleCollisionDetector:
         bx: float,
         by: float,
     ) -> tuple[float, float]:
+        """Return the closest point to ``(px, py)`` on segment ``(a, b)``."""
         ab_x = bx - ax
         ab_y = by - ay
         ap_x = px - ax
@@ -297,6 +418,7 @@ class ObstacleCollisionDetector:
 
     @staticmethod
     def _normalize(x: float, y: float) -> tuple[float, float]:
+        """Return ``(x, y)`` normalized to unit length, or ``(0, 0)`` if degenerate."""
         mag = hypot(x, y)
         if mag <= ObstacleCollisionDetector.EPS:
             return 0.0, 0.0

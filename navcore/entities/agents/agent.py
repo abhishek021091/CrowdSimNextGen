@@ -77,8 +77,8 @@ class Agent:
             raise RuntimeError("Goal has not been initialized.")
         return self.goal
 
-    def set_goal_position(self, position: tuple[float, float]):
-        self.goal = Goal(position[0], position[1])
+    def set_goal_position(self, position: Goal):
+        self.goal = position
 
     def get_velocity(self) -> Velocity:
         if self.velocity is None:

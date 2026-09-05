@@ -6,6 +6,7 @@ import tomllib
 import navcore.configs
 from navcore.entities.agents.pedestrians import Pedestrian
 from navcore.entities.agents.robot import Robot
+from navcore.entities.environment.collision_checker import CollisionChecker
 from navcore.entities.groups.group import Group
 from navcore.entities.obstacles.obstacle import Obstacle
 
@@ -20,6 +21,7 @@ class EnvironmentInfo:
     arena_width: str = env_config["arenaSize"]["width"]
     arena_height: str = env_config["arenaSize"]["height"]
     random_seed: int = env_config["random"]["seed"]
+    collision_counter: int = 0
 
 
 @dataclass
@@ -44,3 +46,11 @@ class Environment:
 
     def get_info(self) -> EnvironmentInfo:
         return self.info
+
+    def did_collision_happened(self) -> bool:
+        """Check if any collision has occurred in the environment."""
+        collision_checker = CollisionChecker(self.robot, self)
+        collision_happened = collision_checker.check_collision()
+        if collision_happened:
+            self.info.collision_counter += 1
+        return collision_happened
