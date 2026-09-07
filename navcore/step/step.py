@@ -32,7 +32,9 @@ import navcore.configs
 
 # from navcore.collision_detector.sat import SAT
 from navcore.entities.agents.agent import Agent
-from navcore.entities.components.state import ObservableState
+from navcore.entities.components.geometry.vector2 import Vector2
+from navcore.entities.components.goal import Goal
+from navcore.entities.components.state import FullState, ObservableState
 from navcore.entities.components.velocity import Velocity
 from navcore.entities.environment.environment import Environment
 from navcore.middleware.orca_middleware import VelocityPlanner
@@ -102,7 +104,7 @@ class Step:
     def step(self) -> StepResult:
         self._validate()
         self._change_group_goals()
-        result = self._compute_velocities()
+        result = self._compute_velocities(robot_velocity_override)
         self._set_velocities(result.robot_velocity, result.crowd_velocities)
 
         self._advance_agent(self.env.robot)
@@ -131,8 +133,10 @@ class Step:
 
     # -- velocity computation -------------------------------------------
 
-    def _compute_velocities(self) -> StepResult:
-        robot_velocity = self._compute_robot_velocity()
+    def _compute_velocities(
+        self, robot_velocity_override: Velocity | None = None
+    ) -> StepResult:
+        robot_velocity = self._compute_robot_velocity(robot_velocity_override)
         crowd_velocities = self._compute_crowd_velocities()
         assert self.env.robot.pose is not None and self.env.robot.goal is not None
         if (
@@ -165,7 +169,11 @@ class Step:
             crowd_velocities=crowd_velocities,
         )
 
-    def _compute_robot_velocity(self) -> Velocity:
+    def _compute_robot_velocity(
+        self, robot_velocity_override: Velocity | None = None
+    ) -> Velocity:
+        if robot_velocity_override is not None:
+            return robot_velocity_override
         assert self.env.robot.sensor is not None
         robot_obs = self.get_observations(self.env.robot)
 
@@ -173,10 +181,10 @@ class Step:
         #     self.env.robot, self.robot_mission, list(robot_obs.values())
         # )
         # full_state = self._full_state_for(self.env.robot, target)
-        full_state = self.env.robot.get_full_state()
+        robot_full_state = self.env.robot.get_full_state()
 
         robot_velocity, _ = self.planner.compute_velocities(
-            self.ROBOT_KEY, full_state, robot_obs
+            self.ROBOT_KEY, robot_full_state, robot_obs
         )
         return robot_velocity
 
@@ -193,10 +201,10 @@ class Step:
 
             # mission = self.crowd_missions.get(ped_id)
             # target = self._target_for(ped, mission, list(ped_obs.values()))
-            full_state = self.env.crowd[ped_id].get_full_state()
+            ped_full_state = self.env.crowd[ped_id].get_full_state()
 
             ped_velocity, _ = self.planner.compute_velocities(
-                ped_id, full_state, ped_obs
+                ped_id, ped_full_state, ped_obs
             )
             crowd_velocities[ped_id] = ped_velocity
 
