@@ -81,6 +81,7 @@ class Step:
         env: Environment,
         robot_visible: bool,
         robot_mission: Mission | None = None,
+        rand: np.random.Generator | None = None,
     ) -> None:
         self.env = env
         self.robot = env.robot
@@ -89,6 +90,7 @@ class Step:
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
+        self.rand = rand if rand is not None else np.random.default_rng()
 
     def get_observations(self, agent: Agent) -> dict[int, ObservableState]:
         """Return the agent's sensor observation, filtered by visibility."""
@@ -182,7 +184,7 @@ class Step:
         crowd_velocities: dict[int, Velocity] = {}
 
         for ped_id, ped in self.env.crowd.items():
-            if np.random.choice([True, False], p=[0.2, 0.8]) and ped_id % 10 == 0:
+            if self.rand.random() < 0.2 and ped_id % 10 == 0:
                 crowd_velocities[ped_id] = Velocity(0, 0)
                 continue  # Skip this pedestrian with 40% probability
             assert ped.sensor is not None

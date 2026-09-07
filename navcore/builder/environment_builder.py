@@ -16,10 +16,14 @@ class EnvironmentBuilder:
     env_path = Path(navcore.configs.__file__).parent / "env.toml"
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
-    rand = np.random.default_rng(seed=env_config["random"]["seed"])
 
-    def __init__(self):
+    def __init__(self, rand: np.random.Generator | None = None):
         self.info = EnvironmentInfo()
+        self.rand = (
+            rand
+            if rand is not None
+            else np.random.default_rng(seed=self.env_config["random"]["seed"])
+        )
         self.crowd_builder = CrowdBuilder(self.rand)
         self.robot_builder = RobotBuilder(self.rand)
         self.obstacle_builder = ObstacleBuilder(self.rand)

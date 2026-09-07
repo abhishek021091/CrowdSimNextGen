@@ -68,6 +68,7 @@ class SweepingMission:
         self.collisions: int = 0
         self.area_swept: float = 0.0
         self.avoiding_obstacle: bool = False
+        self.current_safe_point: tuple[float, float] | None = None
         self._lanes_completed: int = 0
         self._lane_start_primary_pos: float = 0.0
 
@@ -239,8 +240,19 @@ class SweepingMission:
         return self.area_swept
 
     def avoid_crowd(self, predictor, step, safe_point_finder) -> None:
-        """Avoid a crowd and return to the original sweeping path."""
+        """Avoid a crowd intrusion and return to the original sweeping path.
 
+        Bug fix note:
+            ``predictor.checkIntrusionSAT`` returns ``True`` when a collision
+            is predicted -- i.e. "danger", not "safe" (see its docstring:
+            "Return whether any neighbor enters agent's swept safety
+            corridor"). The previous version assigned that return value
+            directly to ``original_path_safe``, which meant the mission
+            returned to the original path exactly when a collision *was*
+            predicted, and kept evading exactly when the path was actually
+            clear -- backwards in both directions. Fixed by negating the
+            predictor's result.
+        """
         self.avoiding_obstacle = True
 
         pose_before_avoidance = deepcopy(self.env.robot.pose)
@@ -252,6 +264,7 @@ class SweepingMission:
         )
 
         safe_point = None
+        self.current_safe_point = None
         returning = False
 
         while self.avoiding_obstacle:
@@ -274,7 +287,7 @@ class SweepingMission:
             # 1. Check whether the original sweep path is safe again.
             # ---------------------------------------------------------
             if intrusion_point_observable:
-                original_path_safe = predictor.checkIntrusionSAT(
+                original_path_safe = not predictor.checkIntrusionSAT(
                     pose_before_avoidance,
                     goal_before_avoidance,
                 )
@@ -285,6 +298,7 @@ class SweepingMission:
             if original_path_safe:
                 returning = True
                 safe_point = None
+                self.current_safe_point = None
 
                 self.env.robot.set_goal_position(
                     Goal(
@@ -299,6 +313,7 @@ class SweepingMission:
             elif not returning:
                 if safe_point is None:
                     safe_point = safe_point_finder.find_safe_point(self.env.robot.pose)
+                    self.current_safe_point = safe_point
 
                     if safe_point is not None:
                         self.env.robot.set_goal_position(
@@ -323,12 +338,15 @@ class SweepingMission:
 
                     if dist_to_safe_point < 0.02:
                         safe_point = None
+                        self.current_safe_point = None
 
             # ---------------------------------------------------------
             # 4. Intrusion point left sensor range -> return toward it.
             # ---------------------------------------------------------
             if not intrusion_point_observable:
                 returning = True
+                safe_point = None
+                self.current_safe_point = None
 
                 self.env.robot.set_goal_position(
                     Goal(
@@ -364,3 +382,4 @@ class SweepingMission:
                     self.avoiding_obstacle = False
                     returning = False
                     safe_point = None
+                    self.current_safe_point = None

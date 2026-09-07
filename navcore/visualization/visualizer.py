@@ -6,9 +6,10 @@ from matplotlib.animation import FuncAnimation
 
 import navcore.configs
 from navcore.entities.environment.environment import Environment
-from navcore.visualization_1.entities.crowd_visualizer import CrowdVisualizer
-from navcore.visualization_1.entities.obstacle_visualizer import ObstacleVisualizer
-from navcore.visualization_1.entities.robot_visualizer import RobotVisualizer
+from navcore.missions import mission
+from navcore.visualization.entities.crowd_visualizer import CrowdVisualizer
+from navcore.visualization.entities.obstacle_visualizer import ObstacleVisualizer
+from navcore.visualization.entities.robot_visualizer import RobotVisualizer
 
 
 class Visualizer:
@@ -22,8 +23,7 @@ class Visualizer:
         self.env: Environment | None = None
         self.fig, self.ax = plt.subplots(figsize=(10, 10))
 
-    def visualize(self, env: Environment) -> None:
-        """Draw the environment, robot, obstacles, and pedestrians."""
+    def visualize(self, env: Environment, mission=None) -> None:
         self.env = env
         self.ax.clear()
         self.ax.set_xlim(-self.arena_width / 2 - 0.5, self.arena_width / 2 + 0.5)
@@ -32,10 +32,15 @@ class Visualizer:
 
         CrowdVisualizer(env, self.ax).draw()
         ObstacleVisualizer(env, self.ax).draw()
-        RobotVisualizer(env, self.ax).draw()
+        RobotVisualizer(env, self.ax, mission=mission).draw()
 
-    def refresh(self, env: Environment) -> None:
-        self.visualize(env)
+    def refresh(self, env: Environment, mission=None) -> None:
+        self.visualize(env, mission=mission)
+        self.fig.canvas.draw_idle()
+        plt.pause(0.001)
+
+    def refresh(self, env: Environment, mission=None) -> None:
+        self.visualize(env, mission=mission)
         self.fig.canvas.draw_idle()
         plt.pause(0.001)  # Allow the GUI event loop to process events
 

@@ -1,7 +1,7 @@
 """Small manual smoke test for the Matplotlib visualizer."""
 
 from navcore.builder.environment_builder import EnvironmentBuilder
-from navcore.visualization_1.visualizer import Visualizer
+from navcore.visualization.visualizer import Visualizer
 from navcore.step.step import Step
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
 

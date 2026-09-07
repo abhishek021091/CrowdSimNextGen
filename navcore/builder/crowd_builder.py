@@ -105,14 +105,12 @@ class CrowdBuilder:
 
     def generate_goal(self, method: str = "opposite") -> Goal:
         if method == "opposite":
-            goal: Goal = np.random.choice(
-                [
-                    Goal(-self.pose.px, -self.pose.py),
-                    Goal(-self.pose.px, self.pose.py),
-                    Goal(self.pose.px, -self.pose.py),
-                ]
+            options = (
+                Goal(-self.pose.px, -self.pose.py),
+                Goal(-self.pose.px, self.pose.py),
+                Goal(self.pose.px, -self.pose.py),
             )
-            return goal
+            return options[self.rand.integers(len(options))]
         else:
             theta = self.rand.uniform(0, 2 * np.pi)
             sides: list[tuple[float, float]] = [
@@ -136,8 +134,8 @@ class CrowdBuilder:
 
             side = sides[self.rand.integers(len(sides))]
 
-            gx = side[0] + np.cos(theta) + np.random.choice([0.0, 0.5])
-            gy = side[1] + np.sin(theta) + np.random.choice([0.0, 0.5])
+            gx = side[0] + np.cos(theta) + self.rand.choice([0.0, 0.5])
+            gy = side[1] + np.sin(theta) + self.rand.choice([0.0, 0.5])
             return Goal(gx, gy)
 
     def build_single_pedestrian(self, ped_id: int) -> Pedestrian | None:
