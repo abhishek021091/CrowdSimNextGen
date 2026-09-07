@@ -15,7 +15,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from navcore.entities.agents.agent import Agent
+from navcore.entities.components.geometry.vector2 import Vector2
+from navcore.entities.components.goal import Goal
+from navcore.entities.components.pose import Pose
 from navcore.entities.components.state import ObservableState
+from navcore.entities.components.velocity import Velocity
 from navcore.entities.obstacles import Obstacle
 from navcore.policies.base_orca_planner import obstacle_to_vertices
 
@@ -65,7 +69,9 @@ class SAT:
 
         return collision_detected or obstacle_collision_detected
 
-    def checkIntrusionSAT(self) -> bool:
+    def checkIntrusionSAT(
+        self, pose: Pose | None = None, goal: Goal | None = None
+    ) -> bool:
         """Return whether any neighbor enters ``agent``'s swept safety corridor.
 
         Projects each neighbor's relative position/velocity onto the
@@ -81,12 +87,26 @@ class SAT:
         """
         assert self.agent.pose is not None
         assert self.agent.velocity is not None
+        if pose is None and goal is None:
+            pose = self.agent.pose
+            goal = self.agent.goal
+            velocity = self.agent.velocity
+        elif pose is not None and goal is not None:
+            direction = Vector2(goal.gx - pose.px, goal.gy - pose.py).normalize()
+
+            velocity = Velocity(
+                direction.x * self.agent.v_pref,
+                direction.y * self.agent.v_pref,
+            )
+        else:
+            raise ValueError("Both pose and goal must be provided together.")
+
         agent_pos = np.array(
-            [self.agent.pose.px, self.agent.pose.py],
+            [pose.px, pose.py],
             dtype=np.float64,
         )
         agent_vel = np.array(
-            [self.agent.velocity.vx, self.agent.velocity.vy],
+            [velocity.vx, velocity.vy],
             dtype=np.float64,
         )
 

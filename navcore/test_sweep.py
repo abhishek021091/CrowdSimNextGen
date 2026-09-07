@@ -10,93 +10,94 @@ class SweepTest:
     def __init__(self) -> None:
         self.env_builder = EnvironmentBuilder()
         self.env = self.env_builder.build_environment()
-        self.sweeping_mission = SweepingMission(env=self.env)
 
-        # Built once, not per tick: obstacles are static for the episode
-        # (see DecentralizedORCAPlanner's own docstring), so rebuilding
-        # this -- and its obstacle-vertex cache -- on every step() call
-        # was pure wasted work in the hot loop.
+        self.mission = SweepingMission(self.env)
+
         self._planner = DecentralizedORCAPlanner(
-            config_file="orca.toml", obstacles=self.env.obstacles
+            config_file="orca.toml",
         )
+
         self._step = Step(
             env=self.env,
             robot_visible=False,
             planner=self._planner,
         )
 
-    def visualize(self) -> None:
-        visualizer = Visualizer()
-        visualizer.animate(self.env)
+        self.visualizer = Visualizer()
 
     def step(self):
-        """Advance the simulation by one step."""
         return self._step.step()
 
-    def run_simulation(self) -> None:
-        """Run the simulation for a number of steps."""
-        visualizer = Visualizer()
-        count = 0
+    def _collision_predictor(self) -> SAT:
+        observation = self.env.robot.sensor.observe(
+            self.env,
+            robot_visible=False,
+        )
 
-        while True:
-            count += 1
-            result = self.step()
-            visualizer.refresh(self.env)
+        return SAT(
+            observation,
+            self.env.robot,
+            self.env.obstacles,
+        )
 
-            mission = self.sweeping_mission
+    def _update_mission(self, result) -> None:
+        if not self.mission.started:
+            self.mission.reach_closest_corner()
+            return
 
-            if not mission.started:
-                mission.reach_closest_corner()
+        predictor = self._collision_predictor()
 
-            elif result.robot_reached_goal:
-                # First arrival (at the corner) transitions into the
-                # sweeping phase; every arrival after that advances one
-                # more lane step. Both cases need update_sweep() --
-                # only the flag flip differs.
-                if not mission.sweeping:
-                    mission.sweeping = True
-                mission.update_sweep()
+        self.mission.avoid_crowd(
+            predictor=predictor,
+            step=self._step.step,
+            safe_point_finder=...,  # your SafePointFinder
+        )
 
-            self.robot_observation = self.env.robot.sensor.observe(
-                self.env, robot_visible=False
-            )
-            collision_predictor = SAT(
-                self.robot_observation, self.env.robot, self.env.obstacles
-            ).checkIntrusionSAT()
-            if collision_predictor and not mission.avoiding_obstacle:
-                mission.avoiding_obstacle = True
-                last_pose = self.env.robot.pose
-                last_goal = self.env.robot.goal
-            elif not collision_predictor and not mission.avoiding_obstacle:
-                self.env.robot.set_goal_position(last_pose)
-            else:
-                distance_to_last_pose = np.linalg.norm(
-                    [
-                        self.env.robot.pose.px - last_pose.px,
-                        self.env.robot.pose.py - last_pose.py,
-                    ]
+        if self.mission.avoiding_obstacle:
+            return
+
+        if result.robot_reached_goal:
+            if not self.mission.sweeping:
+                self.mission.sweeping = True
+
+            self.mission.update_sweep()
+
+    def _respawn_pedestrians(self, result, count: int) -> None:
+        for ped_id, reached in result.pedestrian_reached_goals.items():
+            if reached:
+                self.env_builder.rebuild_pedestrian(
+                    ped_id=ped_id,
+                    env=self.env,
+                    random_seed=self.env.info.random_seed + count + ped_id,
                 )
-                if distance_to_last_pose < 0.1:
-                    mission.avoiding_obstacle = False
-                    self.env.robot.set_goal_position(last_goal)
 
-            if mission.sweep_finished:
-                print("Sweep mission completed!")
-            if self.env.did_collision_happened():
-                print(f"Total collisions: {self.env.info.collision_counter}")
+    def _print_status(self) -> None:
+        if self.mission.sweep_finished:
+            print("Sweep mission completed.")
 
-            area_swept = mission.total_area_swept()
-            print(f"Area swept so far: {area_swept:.2f} m^2")
+        if self.env.did_collision_happened():
+            print(f"Total collisions: {self.env.info.collision_counter}")
 
-            for ped_id, reached in result.pedestrian_reached_goals.items():
-                if reached:
-                    self.env_builder.rebuild_pedestrian(
-                        ped_id=ped_id,
-                        env=self.env,
-                        random_seed=self.env.info.random_seed + count + ped_id,
-                    )
+        print(f"Area swept: {self.mission.total_area_swept():.2f} m²")
+
+    def run_simulation(self) -> None:
+        step_count = 0
+
+        while not self.mission.sweep_finished:
+            step_count += 1
+
+            result = self.step()
+
+            self._update_mission(result)
+
+            self.visualizer.refresh(self.env)
+
+            self._print_status()
+
+            self._respawn_pedestrians(result, step_count)
+
+        print("Simulation finished.")
 
 
 if __name__ == "__main__":
-    test = SweepTest()
-    test.run_simulation()
+    SweepTest().run_simulation()

@@ -61,21 +61,31 @@ class ObstacleBuilder:
         num__circular_tables = self.config["circular_table"]["num_tables"]
         num__rectangular_tables = self.config["rectangular_table"]["num_tables"]
 
+        ### For circular tables
         for i in range(num__circular_tables):
             table_id = f"table_{i}"
-            table_radius = float(self.config["circular_table"]["radius"])
-            if self.config["circular_table"]["randomize_radius"]:
+            if self.config["circular_table"]["dimensions"] != "random":
+                table_radius = float(self.config["circular_table"]["radius"][i])
+                table_center = Vector2(
+                    float(self.config["circular_table"]["center"][i][0]),
+                    float(self.config["circular_table"]["center"][i][1]),
+                )
+            else:
+                table_radius = float(self.config["circular_table"]["radius"])
                 table_radius = table_radius + self.rand.uniform(-0.2, 0.2)
-            table_center = Vector2(
-                self.rand.uniform(
-                    -float(self.env_config["arenaSize"]["width"]) / 2 + table_radius,
-                    float(self.env_config["arenaSize"]["width"]) / 2 - table_radius,
-                ),
-                self.rand.uniform(
-                    -float(self.env_config["arenaSize"]["height"]) / 2 + table_radius,
-                    float(self.env_config["arenaSize"]["height"]) / 2 - table_radius,
-                ),
-            )
+                table_center = Vector2(
+                    self.rand.uniform(
+                        -float(self.env_config["arenaSize"]["width"]) / 2
+                        + table_radius,
+                        float(self.env_config["arenaSize"]["width"]) / 2 - table_radius,
+                    ),
+                    self.rand.uniform(
+                        -float(self.env_config["arenaSize"]["height"]) / 2
+                        + table_radius,
+                        float(self.env_config["arenaSize"]["height"]) / 2
+                        - table_radius,
+                    ),
+                )
             table = Table.circular(
                 id=table_id,
                 center=table_center,
@@ -83,25 +93,38 @@ class ObstacleBuilder:
                 name=f"Table {i}",
             )
             self.obstacles[table_id] = table.to_obstacle()
+
+        ### For rectangular tables
         for i in range(num__rectangular_tables):
             table_id = f"table_{i + num__circular_tables}"
-            table_width = float(self.config["rectangular_table"]["width"])
-            table_height = float(self.config["rectangular_table"]["height"])
-            if self.config["rectangular_table"]["randomize_dimensions"]:
-                table_width = table_width + self.rand.uniform(-0.2, 0.2)
-                table_height = table_height + self.rand.uniform(-0.2, 0.2)
-            table_center = Vector2(
-                self.rand.uniform(
-                    -float(self.env_config["arenaSize"]["width"]) / 2 + table_width / 2,
-                    float(self.env_config["arenaSize"]["width"]) / 2 - table_width / 2,
-                ),
-                self.rand.uniform(
-                    -float(self.env_config["arenaSize"]["height"]) / 2
-                    + table_height / 2,
-                    float(self.env_config["arenaSize"]["height"]) / 2
-                    - table_height / 2,
-                ),
-            )
+            if self.config["rectangular_table"]["dimensions"] != "random":
+                table_width = float(self.config["rectangular_table"]["width"][i])
+                table_height = float(self.config["rectangular_table"]["height"][i])
+                table_center = Vector2(
+                    float(self.config["rectangular_table"]["center"][i][0]),
+                    float(self.config["rectangular_table"]["center"][i][1]),
+                )
+            else:
+                table_width = float(
+                    self.config["rectangular_table"]["width"]
+                ) + self.rand.uniform(-0.2, 0.2)
+                table_height = float(
+                    self.config["rectangular_table"]["height"]
+                ) + self.rand.uniform(-0.2, 0.2)
+                table_center = Vector2(
+                    self.rand.uniform(
+                        -float(self.env_config["arenaSize"]["width"]) / 2
+                        + table_width / 2,
+                        float(self.env_config["arenaSize"]["width"]) / 2
+                        - table_width / 2,
+                    ),
+                    self.rand.uniform(
+                        -float(self.env_config["arenaSize"]["height"]) / 2
+                        + table_height / 2,
+                        float(self.env_config["arenaSize"]["height"]) / 2
+                        - table_height / 2,
+                    ),
+                )
 
             table = Table.rectangular(
                 id=table_id,

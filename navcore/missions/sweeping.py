@@ -1,12 +1,20 @@
 """SweepingMission: lawnmower-style coverage mission for the robot."""
 
 from __future__ import annotations
+from copy import deepcopy
+from dataclasses import dataclass
 
 import numpy as np
 
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.pose import Pose
 from navcore.entities.environment.environment import Environment
+
+
+@dataclass
+class GetData:
+    pose_before_avoidance: Pose
+    goal_before_avoidance: Goal
 
 
 class SweepingMission:
@@ -229,3 +237,130 @@ class SweepingMission:
             + lane_width * partial_lane_length
         )
         return self.area_swept
+
+    def avoid_crowd(self, predictor, step, safe_point_finder) -> None:
+        """Avoid a crowd and return to the original sweeping path."""
+
+        self.avoiding_obstacle = True
+
+        pose_before_avoidance = deepcopy(self.env.robot.pose)
+        goal_before_avoidance = deepcopy(self.env.robot.goal)
+
+        self.get_data = GetData(
+            pose_before_avoidance,
+            goal_before_avoidance,
+        )
+
+        safe_point = None
+        returning = False
+
+        while self.avoiding_obstacle:
+            robot_pose = self.env.robot.pose
+
+            dist_from_intrusion = np.linalg.norm(
+                [
+                    robot_pose.px - pose_before_avoidance.px,
+                    robot_pose.py - pose_before_avoidance.py,
+                ]
+            )
+
+            intrusion_point_observable = (
+                dist_from_intrusion < self.env.robot.sensor.range
+            )
+
+            original_path_safe = False
+
+            # ---------------------------------------------------------
+            # 1. Check whether the original sweep path is safe again.
+            # ---------------------------------------------------------
+            if intrusion_point_observable:
+                original_path_safe = predictor.checkIntrusionSAT(
+                    pose_before_avoidance,
+                    goal_before_avoidance,
+                )
+
+            # ---------------------------------------------------------
+            # 2. Original path is safe -> return to intrusion point.
+            # ---------------------------------------------------------
+            if original_path_safe:
+                returning = True
+                safe_point = None
+
+                self.env.robot.set_goal_position(
+                    Goal(
+                        pose_before_avoidance.px,
+                        pose_before_avoidance.py,
+                    )
+                )
+
+            # ---------------------------------------------------------
+            # 3. Original path is not safe -> escape to safe point.
+            # ---------------------------------------------------------
+            elif not returning:
+                if safe_point is None:
+                    safe_point = safe_point_finder.find_safe_point(self.env.robot.pose)
+
+                    if safe_point is not None:
+                        self.env.robot.set_goal_position(
+                            Goal(
+                                safe_point[0],
+                                safe_point[1],
+                            )
+                        )
+
+                        print(f"Safe point: {safe_point}")
+
+                    else:
+                        self.env.robot.set_velocity(0.0, 0.0)
+
+                else:
+                    dist_to_safe_point = np.linalg.norm(
+                        [
+                            robot_pose.px - safe_point[0],
+                            robot_pose.py - safe_point[1],
+                        ]
+                    )
+
+                    if dist_to_safe_point < 0.02:
+                        safe_point = None
+
+            # ---------------------------------------------------------
+            # 4. Intrusion point left sensor range -> return toward it.
+            # ---------------------------------------------------------
+            if not intrusion_point_observable:
+                returning = True
+
+                self.env.robot.set_goal_position(
+                    Goal(
+                        pose_before_avoidance.px,
+                        pose_before_avoidance.py,
+                    )
+                )
+
+            # ---------------------------------------------------------
+            # 5. Step simulation.
+            # ---------------------------------------------------------
+            step()
+
+            # Update pose after movement.
+            robot_pose = self.env.robot.pose
+
+            # ---------------------------------------------------------
+            # 6. If returning, check whether intrusion point is reached.
+            # ---------------------------------------------------------
+            if returning:
+                dist_to_intrusion_point = np.linalg.norm(
+                    [
+                        robot_pose.px - pose_before_avoidance.px,
+                        robot_pose.py - pose_before_avoidance.py,
+                    ]
+                )
+
+                if dist_to_intrusion_point < 0.02:
+                    print("Returned to original sweep path.")
+
+                    self.env.robot.set_goal_position(deepcopy(goal_before_avoidance))
+
+                    self.avoiding_obstacle = False
+                    returning = False
+                    safe_point = None

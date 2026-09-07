@@ -110,10 +110,10 @@ class DecentralizedORCAPlanner:
         self, config_file: str, obstacles: dict[str, Obstacle] | None = None
     ) -> None:
         self.config_file = config_file
-        assert obstacles is not None
-        self._obstacle_vertices: list[list[tuple[float, float]]] = [
-            obstacle_to_vertices(obstacle) for obstacle in obstacles.values()
-        ]
+        if obstacles is not None:
+            self._obstacle_vertices: list[list[tuple[float, float]]] = [
+                obstacle_to_vertices(obstacle) for obstacle in obstacles.values()
+            ]
 
     def compute_velocities(
         self,
@@ -141,7 +141,12 @@ class DecentralizedORCAPlanner:
             local_population[neighbor_id] = self._as_full_state(observed)
 
         planner: BaseORCAPlanner[object] = BaseORCAPlanner(self.config_file)
-        planner.initialize(local_population, obstacle_vertices=self._obstacle_vertices)
+        if hasattr(self, "_obstacle_vertices"):
+            planner.initialize(
+                local_population, obstacle_vertices=self._obstacle_vertices
+            )
+        else:
+            planner.initialize(local_population)
         velocities = planner.compute_velocities(local_population)
 
         self_velocity = velocities.pop(_SELF_KEY)

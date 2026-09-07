@@ -12,8 +12,36 @@ randomize_radius = true
 gate = { enabled = false, num_gates = 2 }
 
 [rectangular_table]
-num_tables = 0
+num_tables = 7
+center = [
+    [
+        0.0,
+        27.0,
+    ],
+    [
+        0.0,
+        7.0,
+    ],
+    [
+        -2.25,
+        -2.75,
+    ],
+    [
+        -2.25,
+        -7.25,
+    ],
+    [
+        2.25,
+        -2.75,
+    ],
+    [
+        -1.25,
+        -27.0,
+    ],
+    [1.75,-21.75]
+]
+height = [13.0, 11.0, 2.5, 2.5, 2.5, 13.0, 2.5]
+width = [7.0, 5.0, 2.5, 2.5, 2.5, 4.5, 2.5]
 shape = "rectangular"
-width = 1.0
-height = 1.0
-randomize_dimensions = true
+dimensions = "given"
+randomize_dimensions = false
