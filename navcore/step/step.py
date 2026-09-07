@@ -101,7 +101,7 @@ class Step:
         obs = agent.sensor.observe(self.env, robot_visible=self.robot_visible)
         return obs
 
-    def step(self) -> StepResult:
+    def step(self, robot_velocity_override: Velocity | None = None) -> StepResult:
         self._validate()
         self._change_group_goals()
         result = self._compute_velocities(robot_velocity_override)
@@ -153,8 +153,9 @@ class Step:
             robot_reached_goal = True
         else:
             robot_reached_goal = False
-        pedestrian_reached_goals = {}
+        pedestrian_reached_goals: dict[int, bool] = {}
         for ped in self.env.crowd.values():
+            assert ped.pose is not None and ped.goal is not None
             if (
                 np.linalg.norm([ped.pose.px - ped.goal.gx, ped.pose.py - ped.goal.gy])
                 > 0.5

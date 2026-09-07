@@ -1,9 +1,11 @@
 from navcore.avoidace_planner.local_avoidace_planner import LocalAvoidancePlanner
 from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.collision_predictor.sat import SAT
+from navcore.entities.components.pose import Pose
+from navcore.entities.environment.environment import Environment
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
 from navcore.missions.sweeping import SweepingMission
-from navcore.step.step import Step
+from navcore.step.step import Step, StepResult
 from navcore.visualization.visualizer import Visualizer
 
 
@@ -16,11 +18,12 @@ class SafePointFinder:
     should probably call LocalAvoidancePlanner directly.
     """
 
-    def __init__(self, planner: LocalAvoidancePlanner, env) -> None:
+    def __init__(self, planner: LocalAvoidancePlanner, env: Environment) -> None:
         self._planner = planner
         self._env = env
 
-    def find_safe_point(self, pose) -> tuple[float, float] | None:
+    def find_safe_point(self, pose: Pose) -> tuple[float, float] | None:
+        assert self._env.robot.sensor is not None
         observation = self._env.robot.sensor.observe(self._env, robot_visible=False)
         point = self._planner.plan_escape_point(observation)
         return point.to_tuple() if point is not None else None
@@ -35,7 +38,7 @@ class SweepTest:
 
         self._planner = DecentralizedORCAPlanner(
             config_file="orca.toml",
-            obstacles=self.env.obstacles,
+            # obstacles=self.env.obstacles,
         )
 
         self._step = Step(
@@ -47,8 +50,8 @@ class SweepTest:
 
         self._local_avoidance = LocalAvoidancePlanner(
             agent=self.env.robot,
-            arena_width=float(self.env.info.arena_width) / 2,
-            arena_height=float(self.env.info.arena_height) / 2,
+            arena_width=float(self.env.info.arena_width),
+            arena_height=float(self.env.info.arena_height),
         )
         self._safe_point_finder = SafePointFinder(self._local_avoidance, self.env)
 
@@ -58,10 +61,11 @@ class SweepTest:
         return self._step.step()
 
     def _collision_predictor(self) -> SAT:
+        assert self.env.robot.sensor is not None
         observation = self.env.robot.sensor.observe(self.env, robot_visible=False)
         return SAT(observation, self.env.robot, self.env.obstacles)
 
-    def _update_mission(self, result) -> None:
+    def _update_mission(self, result: StepResult) -> None:
         if not self.mission.started:
             self.mission.reach_closest_corner()
             return
@@ -75,6 +79,7 @@ class SweepTest:
                 predictor=predictor,
                 step=self._step.step,
                 safe_point_finder=self._safe_point_finder,
+                renderer=self.visualizer,
             )
             # avoid_crowd blocks until fully resolved (see flagged
             # structural issue above) -- by the time control returns
@@ -86,7 +91,7 @@ class SweepTest:
                 self.mission.sweeping = True
             self.mission.update_sweep()
 
-    def _respawn_pedestrians(self, result, count: int) -> None:
+    def _respawn_pedestrians(self, result: StepResult, count: int) -> None:
         for ped_id, reached in result.pedestrian_reached_goals.items():
             if reached:
                 self.env_builder.rebuild_pedestrian(
