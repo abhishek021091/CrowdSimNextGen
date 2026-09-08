@@ -46,11 +46,8 @@ from dataclasses import dataclass
 
 from shapely.geometry import Polygon as ShapelyPolygon
 
+from navcore.boustropheden.boustropheden import DecomposedCell, DecompositionResult
 from navcore.entities.components.geometry.vector2 import Vector2
-from navcore.planning.environment_decomposition import (
-    DecomposedCell,
-    DecompositionResult,
-)
 
 
 @dataclass(frozen=True, slots=True)

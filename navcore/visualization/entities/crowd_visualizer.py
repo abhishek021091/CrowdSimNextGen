@@ -40,25 +40,25 @@ class CrowdVisualizer:
                 color="white",
             )
 
-            if person.goal is not None:
-                self.ax.plot(
-                    person.goal.gx,
-                    person.goal.gy,
-                    marker="*",
-                    markersize=10,
-                    color="blue",
-                    label="Goal",
-                )
+            # if person.goal is not None:
+            #     self.ax.plot(
+            #         person.goal.gx,
+            #         person.goal.gy,
+            #         marker="*",
+            #         markersize=10,
+            #         color="blue",
+            #         label="Goal",
+            #     )
 
-                self.ax.text(
-                    person.goal.gx,
-                    person.goal.gy,
-                    f"Goal {person.id}",
-                    fontsize=8,
-                    ha="center",
-                    va="center",
-                    color="black",
-                )
+            # self.ax.text(
+            #     person.goal.gx,
+            #     person.goal.gy,
+            #     f"Goal {person.id}",
+            #     fontsize=8,
+            #     ha="center",
+            #     va="center",
+            #     color="black",
+            # )
 
     def draw(self) -> None:
         self._draw_crowd()

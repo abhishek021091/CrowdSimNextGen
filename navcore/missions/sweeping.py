@@ -64,7 +64,7 @@ from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.pose import Pose
 from navcore.entities.environment.environment import Environment
-from navcore.planning.graph_traversal import TraversalStep
+from navcore.graph_traversal.traversal import TraversalStep
 
 _EPS = 1e-9
 
