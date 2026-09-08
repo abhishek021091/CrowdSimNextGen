@@ -12,6 +12,7 @@ class RobotVisualizer:
         self.environment = environment
         self.ax = ax
         self.mission = mission
+        self.robot = environment.robot
 
     def _draw_swept_area(self) -> None:
         """Highlight the sweep's coverage region so far.
@@ -43,18 +44,6 @@ class RobotVisualizer:
             x_min, x_max = sorted((mission.sweep_start[0], robot_goal.gx))
             y_min, y_max = -half_height, half_height
 
-        self.ax.add_patch(
-            Rectangle(
-                (x_min, y_min),
-                width=x_max - x_min,
-                height=y_max - y_min,
-                fill=True,
-                color="skyblue",
-                alpha=0.3,
-                zorder=0,  # behind crowd/robot/obstacles
-            )
-        )
-
     def _draw_safe_point(self) -> None:
         mission = self.mission
         if mission is None or mission.current_safe_point is None:
@@ -73,37 +62,47 @@ class RobotVisualizer:
         )
 
     def _draw_robot(self) -> None:
-        robot = self.environment.robot
         avoiding = self.mission is not None and self.mission.avoiding_obstacle
         robot_color = "red" if avoiding else "yellow"
         velocity_color = "yellow" if avoiding else "red"
 
-        if robot.pose is not None:
+        if self.robot.pose is not None:
             self.ax.add_patch(
                 Circle(
-                    (robot.pose.px, robot.pose.py),
-                    radius=robot.radius,
+                    (self.robot.pose.px, self.robot.pose.py),
+                    radius=self.robot.radius,
                     fill=True,
                     color=robot_color,
                     linewidth=2,
                 )
             )
 
-        if robot.goal is not None:
+            self.ax.add_patch(
+                Circle(
+                    (self.robot.pose.px, self.robot.pose.py),
+                    radius=self.robot.radius,
+                    fill=True,
+                    color="skyblue",
+                    alpha=0.3,
+                    zorder=0,
+                )
+            )
+
+        if self.robot.goal is not None:
             self.ax.plot(
-                robot.goal.gx,
-                robot.goal.gy,
+                self.robot.goal.gx,
+                self.robot.goal.gy,
                 marker="*",
                 markersize=10,
                 color="red",
                 label="Goal",
             )
 
-        if robot.sensor is not None and robot.pose is not None:
+        if self.robot.sensor is not None and self.robot.pose is not None:
             self.ax.add_patch(
                 Circle(
-                    (robot.pose.px, robot.pose.py),
-                    radius=robot.sensor.range,
+                    (self.robot.pose.px, self.robot.pose.py),
+                    radius=self.robot.sensor.range,
                     fill=False,
                     color="blue",
                     linestyle="--",
@@ -111,12 +110,12 @@ class RobotVisualizer:
                 )
             )
 
-        if robot.velocity is not None and robot.pose is not None:
-            u = np.cos(robot.pose.theta)
-            v = np.sin(robot.pose.theta)
+        if self.robot.velocity is not None and self.robot.pose is not None:
+            u = np.cos(self.robot.pose.theta)
+            v = np.sin(self.robot.pose.theta)
             self.ax.quiver(
-                robot.pose.px,
-                robot.pose.py,
+                self.robot.pose.px,
+                self.robot.pose.py,
                 u,
                 v,
                 angles="xy",

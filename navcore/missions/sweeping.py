@@ -60,7 +60,7 @@ class SweepingMission:
 
         self.sweep_dir: int = 1
         self.sweep_axes: int = 0
-        self.sweep_start: tuple[float, float] = (0.0, 0.0)
+        self.sweep_start: tuple[float, float]
         self.sweep_stop: tuple[float, float] | None = None
         self.sweep_finished: bool = False
 
@@ -83,6 +83,7 @@ class SweepingMission:
         gx = np.sign(px) * (half_width - self.robot_sweep_margin)
         gy = np.sign(py) * (half_height - self.robot_sweep_margin)
         sweep_start_pose = Goal(gx, gy)
+        self.sweep_start = (gx, gy)
         self.sweep_start_pose = sweep_start_pose
 
         if self.robot_sweep_axes == "random":
@@ -171,6 +172,17 @@ class SweepingMission:
             goal.gx, goal.gy = primary_pos, cross_pos
         else:
             goal.gy, goal.gx = primary_pos, cross_pos
+        if self.sweep_finished:
+            print(
+                f"cross={cross_pos:.2f}, "
+                f"bound={cross_bound:.2f}, "
+                f"margin={margin}, "
+                f"lane={lane_step}, "
+                f"shift_positive={shift_positive}",
+                f"self.sweep_start={self.sweep_start}",
+            )
+            print(f"self.sweep_stop={self.sweep_stop}")
+            print(f"self.sweep_axes={self.sweep_axes}")
 
     def _step_primary(
         self,

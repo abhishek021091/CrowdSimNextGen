@@ -102,9 +102,6 @@ class SweepTest:
 
     def _print_status(self) -> None:
         if self.mission.sweep_finished:
-            result = self._step.step()
-            self._update_mission(result)
-            self.visualizer.refresh(self.env, mission=self.mission)
             print("Sweep mission completed.")
         if self.env.did_collision_happened():
             print(f"Total collisions: {self.env.info.collision_counter}")
@@ -119,6 +116,7 @@ class SweepTest:
             self.visualizer.refresh(self.env, mission=self.mission)
             self._print_status()
             self._respawn_pedestrians(result, step_count)
+
         print("Simulation finished.")
 
 
