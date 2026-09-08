@@ -1,15 +1,72 @@
-"""SweepingMission: lawnmower-style coverage mission for the robot."""
+"""SweepingMission: lawnmower-style coverage of one convex cell.
+
+Redesigned from whole-arena coverage to per-cell coverage, to consume
+DecompositionResult/TraversalStep output (see environment_decomposition.py
+and graph_traversal.py): the BCD+traversal pipeline decides *which* convex
+cell to sweep, and this class's only job is to actually sweep that one
+cell. It has no notion of "the arena" anymore -- env is used only for the
+robot's radius/pose/goal and for avoid_crowd's sensor access, never for
+arena_width/arena_height.
+
+Why there is no stored entry point:
+    An earlier version of this class took an explicit entry_point,
+    computed once by the traversal planner as the midpoint of the edge
+    shared with the previous cell. That's wrong for an open area with a
+    crowd in it: nothing guarantees the robot's actual position, once it
+    finishes transiting into the cell, matches that planned point --
+    ORCA and any avoid_crowd detour along the way can land it somewhere
+    else on the cell's boundary (or well inside it) instead.
+    reach_closest_corner() therefore reads env.robot.pose live, at the
+    moment sweeping actually starts, and picks the nearest corner/lane
+    from wherever the robot really is. The traversal planner's own
+    entry_point/exit_point bookkeeping (graph_traversal.py) is
+    unaffected by this -- it still exists for transit-phase goal-setting
+    between cells, this class just no longer consumes it.
+
+Sweep direction is computed as the cell's minimal-width direction. For a
+convex polygon, the minimum-width supporting direction is always
+perpendicular to one of its edges (the same standard result
+environment_decomposition._polygon_width relies on via
+minimum_rotated_rectangle); trying every edge as a candidate and keeping
+the one with the smallest perpendicular extent finds it exactly, using
+only navcore's own Vector2 math -- no shapely dependency needed here,
+keeping shapely quarantined to environment_decomposition.py as
+originally scoped.
+
+Per-lane clipping, not a fixed rectangle:
+    A rectangle's sweep bounds are the same on every lane. An arbitrary
+    convex cell's are not -- a triangular or pentagonal cell's width at
+    one end of its length can differ from its width at the other. Every
+    lane's [x_min, x_max] is therefore computed on demand
+    (_lane_bounds) by intersecting a horizontal line, in the cell's own
+    rotated local frame, against the cell's actual edges -- not assumed
+    constant across the whole sweep the way a rectangle-arena version
+    could assume.
+
+Area accounting caveat:
+    total_area_swept() sums each completed lane's actual clipped width
+    times lane spacing. This is still an approximation for
+    non-rectangular cells (a lane's swept footprint is a trapezoid-ish
+    strip, not exactly width * lane_step, wherever the cell's boundary
+    isn't parallel to the sweep direction).
+
+avoid_crowd() is unchanged from the whole-arena version: it manipulates
+env.robot.goal / observes the robot's sensor and never referenced arena
+bounds or entry_point in the first place.
+"""
 
 from __future__ import annotations
+
 from copy import deepcopy
 from dataclasses import dataclass
 
-import numpy as np
-
+from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.components.goal import Goal
 from navcore.entities.components.pose import Pose
-from navcore.entities.environment import collision_checker
 from navcore.entities.environment.environment import Environment
+from navcore.planning.graph_traversal import TraversalStep
+
+_EPS = 1e-9
 
 
 @dataclass
@@ -19,29 +76,35 @@ class GetData:
 
 
 class SweepingMission:
-    """Lawnmower-style coverage mission for the robot.
+    """Lawnmower-style coverage mission for one convex cell.
 
-    Drives the robot from its current position to the nearest arena
-    corner, then sweeps back and forth in parallel lanes (perpendicular
-    to ``sweep_axes``) until the far wall is reached.
+    On ``reach_closest_corner()``, drives the robot to whichever corner
+    of the cell is closest to its *current* pose, then sweeps back and
+    forth in lanes perpendicular to the cell's minimal-width direction
+    until the far side of the cell is reached.
 
     All mission progress (``started``, ``sweeping``, ``collisions``,
     ``area_swept``, ``avoiding_obstacle``, ``sweep_finished``) lives on
-    the instance, not on a shared class -- see prior revision notes for
-    why that matters.
+    the instance -- construct a fresh ``SweepingMission`` per cell rather
+    than reusing one across cells (see ``for_traversal_step``).
     """
 
     def __init__(
         self,
         env: Environment,
-        robot_sweep_axes: str = "random",
+        cell_vertices: tuple[Vector2, ...],
         robot_sweep_step: float = 5,
         robot_sweep_lane_step: float | None = None,
-        random_seed: int | None = None,
         robot_sweep_margin: float | None = None,
     ):
+        if len(cell_vertices) < 3:
+            raise ValueError(
+                "SweepingMission requires a polygon of at least 3 vertices, "
+                f"got {len(cell_vertices)}."
+            )
+
         self.env = env
-        self.robot_sweep_axes = robot_sweep_axes
+        self.cell_vertices = cell_vertices
         self.robot_sweep_margin = (
             robot_sweep_margin
             if robot_sweep_margin is not None
@@ -55,13 +118,12 @@ class SweepingMission:
             if robot_sweep_lane_step is not None
             else self.env.robot.radius * 2
         )
-        seed = random_seed if random_seed is not None else self.env.info.random_seed
-        self.rand = np.random.default_rng(seed=seed)
+
+        self.sweep_direction, self.lane_direction = self._minimal_width_axes(
+            cell_vertices
+        )
 
         self.sweep_dir: int = 1
-        self.sweep_axes: int = 0
-        self.sweep_start: tuple[float, float]
-        self.sweep_stop: tuple[float, float] | None = None
         self.sweep_finished: bool = False
 
         self.started: bool = False
@@ -70,211 +132,299 @@ class SweepingMission:
         self.area_swept: float = 0.0
         self.avoiding_obstacle: bool = False
         self.current_safe_point: tuple[float, float] | None = None
-        self._lanes_completed: int = 0
-        self._lane_start_primary_pos: float = 0.0
+
+        self._lane_local_y: float = 0.0
+        self._lane_x_min: float = 0.0
+        self._lane_x_max: float = 0.0
+        self._lane_start_local_x: float = 0.0
+        self._shift_positive: bool = True
+        self._completed_lane_length_sum: float = 0.0
+
+    @classmethod
+    def for_traversal_step(
+        cls, step: TraversalStep, env: Environment, **kwargs
+    ) -> SweepingMission:
+        """Build a mission that sweeps ``step``'s cell.
+
+        Convenience constructor tying this class directly to the
+        decomposition/traversal pipeline's output -- callers driving a
+        full-coverage run should construct one ``SweepingMission`` per
+        ``TraversalStep`` with ``requires_sweep=True`` (transit-only
+        steps don't need a mission at all). ``step.entry_point`` is
+        deliberately not passed through -- see module docstring for why
+        this class reads the robot's live pose instead.
+        """
+        return cls(env=env, cell_vertices=step.cell.vertices, **kwargs)
+
+    # -- local <-> world frame -------------------------------------------
+
+    def _to_local(self, point: Vector2) -> tuple[float, float]:
+        """Project a world-frame point into (along-sweep, along-lane) coordinates.
+
+        This is a pure rotation about the world origin (dot products
+        against unit basis vectors), not a rotation-plus-translation --
+        correct here because ``sweep_direction``/``lane_direction`` are
+        an orthonormal basis and every point involved (cell vertices,
+        goal, pose) is already expressed in the same world frame.
+        """
+        return point.dot(self.sweep_direction), point.dot(self.lane_direction)
+
+    def _to_world(self, local_x: float, local_y: float) -> Vector2:
+        """Inverse of ``_to_local``."""
+        return self.sweep_direction * local_x + self.lane_direction * local_y
+
+    @staticmethod
+    def _minimal_width_axes(vertices: tuple[Vector2, ...]) -> tuple[Vector2, Vector2]:
+        """Return ``(sweep_direction, lane_direction)``, an orthonormal basis
+        aligned with the cell's minimal-width orientation.
+
+        Tries every edge as a candidate sweep direction and keeps
+        whichever gives the smallest perpendicular extent -- see module
+        docstring for why this is exact, not a heuristic, for convex
+        polygons.
+        """
+        n = len(vertices)
+        best_width = float("inf")
+        best_direction = Vector2(1.0, 0.0)
+        best_perp = Vector2(0.0, 1.0)
+
+        for i in range(n):
+            edge = vertices[(i + 1) % n] - vertices[i]
+            if edge.magnitude() < _EPS:
+                continue
+            direction = edge.normalize()
+            perp = Vector2(-direction.y, direction.x)
+
+            projections = [v.dot(perp) for v in vertices]
+            width = max(projections) - min(projections)
+            if width < best_width:
+                best_width = width
+                best_direction = direction
+                best_perp = perp
+
+        return best_direction, best_perp
+
+    # -- per-lane geometry -------------------------------------------------
+
+    def _local_vertices(self) -> list[tuple[float, float]]:
+        return [self._to_local(v) for v in self.cell_vertices]
+
+    def _y_extent(self) -> tuple[float, float]:
+        """Return the cell's full (min, max) extent along the lane axis."""
+        y_values = [ly for _, ly in self._local_vertices()]
+        return min(y_values), max(y_values)
+
+    def _lane_bounds(self, local_y: float) -> tuple[float, float] | None:
+        """Return the margin-shrunk ``(x_min, x_max)`` where the cell's
+        boundary crosses ``local_y``, or ``None`` if the cell doesn't
+        reach ``local_y`` (after margin shrink) at all -- e.g. a lane
+        placed right at a triangular cell's narrowing tip.
+
+        Convex-polygon scanline intersection: for each edge, if
+        ``local_y`` falls within the edge's y-span, linearly interpolate
+        the crossing x. A convex polygon crosses any horizontal line in
+        at most one contiguous span, so the min/max of the collected
+        crossing x's is exactly that span.
+        """
+        local_vertices = self._local_vertices()
+        n = len(local_vertices)
+        xs: list[float] = []
+
+        for i in range(n):
+            x1, y1 = local_vertices[i]
+            x2, y2 = local_vertices[(i + 1) % n]
+
+            if abs(y1 - y2) < _EPS:
+                if abs(y1 - local_y) < _EPS:
+                    xs.extend((x1, x2))
+                continue
+
+            lo, hi = (y1, y2) if y1 < y2 else (y2, y1)
+            if lo - _EPS <= local_y <= hi + _EPS:
+                t = (local_y - y1) / (y2 - y1)
+                xs.append(x1 + t * (x2 - x1))
+
+        if not xs:
+            return None
+
+        x_min = min(xs) + self.robot_sweep_margin
+        x_max = max(xs) - self.robot_sweep_margin
+        if x_min > x_max:
+            return None
+        return x_min, x_max
+
+    # -- mission lifecycle ---------------------------------------------------
 
     def reach_closest_corner(self) -> None:
-        # Move the robot to the corner of the environment
-        assert self.env.robot.pose is not None
-        px = self.env.robot.pose.px
-        py = self.env.robot.pose.py
-        half_width = float(self.env.info.arena_width) / 2
-        half_height = float(self.env.info.arena_height) / 2
-        gx = np.sign(px) * (half_width - self.robot_sweep_margin)
-        gy = np.sign(py) * (half_height - self.robot_sweep_margin)
-        sweep_start_pose = Goal(gx, gy)
-        self.sweep_start = (gx, gy)
-        self.sweep_start_pose = sweep_start_pose
+        """Set the robot's goal to the cell corner closest to its current pose.
 
-        if self.robot_sweep_axes == "random":
-            sweep_axes = int(self.rand.integers(0, 2))
-        else:
-            assert self.robot_sweep_axes in (0, 1)
-            sweep_axes = self.robot_sweep_axes
-        self.sweep_axes = sweep_axes
+        Reads ``env.robot.pose`` live rather than a stored entry point --
+        see module docstring. "Closest corner" means: whichever end of
+        the cell's lane-axis extent is nearer the robot's current
+        position decides the starting lane, and whichever end of that
+        lane's clipped x-range is nearer decides the starting x.
 
-        if sweep_axes == 0:
-            self.sweep_dir = -1 if gx > 0 else 1
-            total_lanes_required = float(self.env.info.arena_width) / (
-                self.env.robot.radius * 2
+        Raises:
+            RuntimeError: If the robot has no pose yet, or if the cell is
+                degenerate enough that no lane bounds can be found near
+                its lane-axis extent (should not happen for any cell that
+                survived environment_decomposition's convexity/area
+                checks).
+        """
+        if self.env.robot.pose is None:
+            raise RuntimeError(
+                "SweepingMission.reach_closest_corner() requires the robot's "
+                "pose to be set."
             )
-            self.sweep_stop = (gx, -gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
-        else:
-            self.sweep_dir = -1 if gy > 0 else 1
-            total_lanes_required = float(self.env.info.arena_height) / (
-                self.env.robot.radius * 2
-            )
-            self.sweep_stop = (-gx, gy) if total_lanes_required % 2 == 0 else (-gx, -gy)
+        current_position = Vector2(self.env.robot.pose.px, self.env.robot.pose.py)
+        current_x, current_y = self._to_local(current_position)
+        y_min, y_max = self._y_extent()
 
-        self.env.robot.set_goal_position(sweep_start_pose)
-        self._lane_start_primary_pos = (
-            sweep_start_pose.gx if sweep_axes == 0 else sweep_start_pose.gy
+        self._shift_positive = abs(current_y - y_min) <= abs(current_y - y_max)
+        start_y = (
+            y_min + self.robot_sweep_margin
+            if self._shift_positive
+            else y_max - self.robot_sweep_margin
         )
+
+        lane_bounds = self._lane_bounds(start_y)
+        if lane_bounds is None:
+            raise RuntimeError(
+                f"SweepingMission: no valid lane found near y={start_y!r}; "
+                "cell may be too small for the current robot radius/margin."
+            )
+        self._lane_x_min, self._lane_x_max = lane_bounds
+
+        start_x = (
+            self._lane_x_min
+            if abs(current_x - self._lane_x_min) <= abs(current_x - self._lane_x_max)
+            else self._lane_x_max
+        )
+        self.sweep_dir = 1 if start_x == self._lane_x_min else -1
+
+        self._lane_local_y = start_y
+        self._lane_start_local_x = start_x
+
+        world_point = self._to_world(start_x, start_y)
+        self.env.robot.set_goal_position(Goal(world_point.x, world_point.y))
         self.started = True
 
     def update_sweep(self) -> None:
         """Advance the robot's sweep goal by one step (lawnmower pattern).
 
-        Call this once per tick after ``reach_closest_corner`` has been
-        called once to establish ``sweep_start``/``sweep_stop``/``sweep_dir``.
-        Mutates ``self.env.robot.goal`` in place; sets ``self.sweep_finished``
-        to True once the far wall is reached on the cross axis.
-
-        Design note -- why this is axis-agnostic instead of two branches:
-            A previous version duplicated this logic once per axis. The
-            y-axis copy's lane-shift direction was hardcoded instead of
-            depending on the sweep's starting quadrant (unlike the
-            x-axis copy, which correctly varied it via
-            ``sweep_start[1] > 0``), so sweeps along the y-axis shifted
-            lanes the wrong way and finished early, well short of full
-            coverage -- the same class of bug as the known
-            ``BoustrophedonPlanner`` coverage issue. Expressing the step
-            once, parameterized by which coordinate is "primary" (the
-            one advancing every tick) vs. "cross" (the one that shifts
-            by a lane on each turn), makes that kind of axis-specific
-            drift structurally impossible: there is only one
-            implementation for both axes to share.
+        "Primary axis" and "cross axis" are the cell's own computed
+        sweep/lane directions rather than a hardcoded x-or-y choice, and
+        lane bounds are recomputed per lane instead of fixed -- this is
+        what lets one implementation handle every convex cell shape
+        without a per-axis special case (the same class of bug the
+        original whole-arena version's axis-agnostic rewrite was fixing).
         """
-        half_width = float(self.env.info.arena_width) / 2
-        half_height = float(self.env.info.arena_height) / 2
-        margin = self.robot_sweep_margin
-        lane_step = self.robot_sweep_lane_step
-
         goal = self.env.robot.goal
+        assert goal is not None
+        current_x, current_y = self._to_local(Vector2(goal.gx, goal.gy))
 
-        if self.sweep_axes == 0:
-            assert goal is not None
-            primary_pos, cross_pos = goal.gx, goal.gy
-            primary_bound, cross_bound = half_width, half_height
-            # Which quadrant the sweep started in decides which way
-            # lanes shift on each turn.
-            shift_positive = self.sweep_start[1] > 0
-        else:
-            assert goal is not None
-            primary_pos, cross_pos = goal.gy, goal.gx
-            primary_bound, cross_bound = half_height, half_width
-            shift_positive = self.sweep_start[0] > 0
+        next_x, turned = self._step_primary(current_x)
+        next_y = current_y
 
-        primary_pos = self._step_primary(
-            primary_pos, primary_bound, margin, shift_positive, lane_step
-        )
-        if self._turned_this_call:
-            cross_pos += -lane_step if shift_positive else lane_step
+        if turned:
+            self._completed_lane_length_sum += self._lane_x_max - self._lane_x_min
 
-        if cross_pos > cross_bound - margin:
-            cross_pos = cross_bound - margin
-            self.sweep_finished = True
-        elif cross_pos < -cross_bound + margin:
-            cross_pos = -cross_bound + margin
-            self.sweep_finished = True
-
-        if self.sweep_axes == 0:
-            goal.gx, goal.gy = primary_pos, cross_pos
-        else:
-            goal.gy, goal.gx = primary_pos, cross_pos
-        if self.sweep_finished:
-            print(
-                f"cross={cross_pos:.2f}, "
-                f"bound={cross_bound:.2f}, "
-                f"margin={margin}, "
-                f"lane={lane_step}, "
-                f"shift_positive={shift_positive}",
-                f"self.sweep_start={self.sweep_start}",
+            candidate_y = current_y + (
+                self.robot_sweep_lane_step
+                if self._shift_positive
+                else -self.robot_sweep_lane_step
             )
-            print(f"self.sweep_stop={self.sweep_stop}")
-            print(f"self.sweep_axes={self.sweep_axes}")
 
-    def _step_primary(
-        self,
-        primary_pos: float,
-        bound: float,
-        margin: float,
-        shift_positive: bool,
-        lane_step: float,
-    ) -> float:
-        """Advance the primary-axis coordinate by one step, or turn.
+            y_min, y_max = self._y_extent()
+            if self._shift_positive and candidate_y > y_max - self.robot_sweep_margin:
+                candidate_y = y_max - self.robot_sweep_margin
+                self.sweep_finished = True
+            elif (
+                not self._shift_positive
+                and candidate_y < y_min + self.robot_sweep_margin
+            ):
+                candidate_y = y_min + self.robot_sweep_margin
+                self.sweep_finished = True
 
-        Sets ``self._turned_this_call`` so the caller knows whether to
-        also shift the cross-axis coordinate this tick.
+            lane_bounds = self._lane_bounds(candidate_y)
+            if lane_bounds is None:
+                # The cell has narrowed to nothing at this lane (e.g. a
+                # triangular cell's tip) -- there is nothing left to sweep.
+                self.sweep_finished = True
+                lane_bounds = (next_x, next_x)
+
+            self._lane_x_min, self._lane_x_max = lane_bounds
+            next_x = min(max(next_x, self._lane_x_min), self._lane_x_max)
+            self._lane_start_local_x = (
+                self._lane_x_min if self.sweep_dir == 1 else self._lane_x_max
+            )
+            next_y = candidate_y
+
+        self._lane_local_y = next_y
+        world_point = self._to_world(next_x, next_y)
+        goal.gx, goal.gy = world_point.x, world_point.y
+
+    def _step_primary(self, primary_pos: float) -> tuple[float, bool]:
+        """Advance the sweep-axis coordinate by one step, or turn.
+
+        Returns:
+            ``(next_pos, turned)`` -- ``turned`` is ``True`` exactly when
+            this call hit the current lane's bound and flipped
+            ``sweep_dir``, signalling the caller to also shift lanes.
         """
-        self._turned_this_call = False
         next_pos = primary_pos + self.sweep_dir * self.robot_sweep_step
 
-        if next_pos > bound - margin:
-            if primary_pos != bound - margin:
-                next_pos = bound - margin
-            else:
-                next_pos = primary_pos
+        if self.sweep_dir > 0:
+            if next_pos > self._lane_x_max:
+                if primary_pos < self._lane_x_max - _EPS:
+                    return self._lane_x_max, False
                 self.sweep_dir = -1
-                self._turned_this_call = True
-        elif next_pos < -bound + margin:
-            if primary_pos != -bound + margin:
-                next_pos = -bound + margin
-            else:
-                next_pos = primary_pos
+                return primary_pos, True
+        else:
+            if next_pos < self._lane_x_min:
+                if primary_pos > self._lane_x_min + _EPS:
+                    return self._lane_x_min, False
                 self.sweep_dir = 1
-                self._turned_this_call = True
+                return primary_pos, True
 
-        if self._turned_this_call:
-            self._lanes_completed += 1
-            self._lane_start_primary_pos = next_pos
-
-        return next_pos
+        return next_pos, False
 
     def total_area_swept(self) -> float:
         """Return the area swept so far, in square meters.
 
-        Derived from completed lanes plus real progress into the current
-        lane -- never from distance to a goal the robot hasn't reached
-        yet. A tick-by-tick accumulator keyed on pose-to-goal distance
-        would credit area for ground the robot is only *about* to cover,
-        which overcounts the moment a lane is aborted (avoidance detour,
-        collision, early stop). This is deterministic and can't drift.
+        Derived from completed lanes' actual clipped widths plus real
+        progress into the current lane -- never from distance to a goal
+        the robot hasn't reached yet (crediting area for ground the robot
+        is only about to cover would overcount the moment a lane is
+        aborted). See module docstring for the non-rectangular-cell
+        approximation caveat.
         """
-        arena_length = (
-            float(self.env.info.arena_height)
-            if self.sweep_axes == 0
-            else float(self.env.info.arena_width)
-        )
+        pose = self.env.robot.pose
+        current_x = self._lane_start_local_x
+        if pose is not None:
+            current_x, _ = self._to_local(Vector2(pose.px, pose.py))
+
+        partial_lane_length = abs(current_x - self._lane_start_local_x)
         lane_width = self.robot_sweep_lane_step
 
-        pose = self.env.robot.pose
-        current_primary_pos: float = self._lane_start_primary_pos
-        if pose is not None:
-            current_primary_pos = pose.px if self.sweep_axes == 0 else pose.py
-
-        partial_lane_length: float = abs(
-            current_primary_pos - self._lane_start_primary_pos
-        )
-        self.area_swept: float = (
-            self._lanes_completed * lane_width * arena_length
-            + lane_width * partial_lane_length
+        self.area_swept = lane_width * (
+            self._completed_lane_length_sum + partial_lane_length
         )
         return self.area_swept
 
     def avoid_crowd(self, predictor, step, safe_point_finder, renderer) -> None:
         """Avoid a crowd intrusion and return to the original sweeping path.
 
-        Bug fix note:
-            ``predictor.checkIntrusionSAT`` returns ``True`` when a collision
-            is predicted -- i.e. "danger", not "safe" (see its docstring:
-            "Return whether any neighbor enters agent's swept safety
-            corridor"). The previous version assigned that return value
-            directly to ``original_path_safe``, which meant the mission
-            returned to the original path exactly when a collision *was*
-            predicted, and kept evading exactly when the path was actually
-            clear -- backwards in both directions. Fixed by negating the
-            predictor's result.
+        Unchanged from the whole-arena version -- see module docstring:
+        this never referenced arena bounds or entry_point, so nothing
+        here depends on the cell-based redesign.
         """
         self.avoiding_obstacle = True
         assert self.env.robot.pose is not None and self.env.robot.goal is not None
         pose_before_avoidance = deepcopy(self.env.robot.pose)
         goal_before_avoidance = deepcopy(self.env.robot.goal)
 
-        self.get_data = GetData(
-            pose_before_avoidance,
-            goal_before_avoidance,
-        )
+        self.get_data = GetData(pose_before_avoidance, goal_before_avoidance)
 
         safe_point = None
         self.current_safe_point = None
@@ -284,131 +434,85 @@ class SweepingMission:
             predictor.obs = self.env.robot.sensor.observe(self.env, robot_visible=False)
             robot_pose = self.env.robot.pose
 
-            dist_from_intrusion = np.linalg.norm(
-                [
-                    robot_pose.px - pose_before_avoidance.px,
-                    robot_pose.py - pose_before_avoidance.py,
-                ]
-            )
+            dist_from_intrusion = (
+                (robot_pose.px - pose_before_avoidance.px) ** 2
+                + (robot_pose.py - pose_before_avoidance.py) ** 2
+            ) ** 0.5
             assert self.env.robot.sensor is not None
             intrusion_point_observable = (
                 dist_from_intrusion < self.env.robot.sensor.range
             )
 
             original_path_safe = False
-
-            # ---------------------------------------------------------
-            # 1. Check whether the original sweep path is safe again.
-            # ---------------------------------------------------------
             if intrusion_point_observable:
                 original_path_safe = not predictor.checkIntrusionSAT(
-                    pose_before_avoidance,
-                    goal_before_avoidance,
+                    pose_before_avoidance, goal_before_avoidance
                 )
 
-            # ---------------------------------------------------------
-            # 2. Original path is safe -> return to intrusion point.
-            # ---------------------------------------------------------
             if original_path_safe:
                 returning = True
                 safe_point = None
                 self.current_safe_point = None
-
                 self.env.robot.set_goal_position(
-                    Goal(
-                        pose_before_avoidance.px,
-                        pose_before_avoidance.py,
-                    )
+                    Goal(pose_before_avoidance.px, pose_before_avoidance.py)
                 )
-
-            # ---------------------------------------------------------
-            # 3. Original path is not safe -> escape to safe point.
-            # ---------------------------------------------------------
             elif not returning:
                 if safe_point is None:
                     safe_point = safe_point_finder.find_safe_point(self.env.robot.pose)
                     self.current_safe_point = safe_point
-
                     if safe_point is not None:
                         self.env.robot.set_goal_position(
-                            Goal(
-                                safe_point[0],
-                                safe_point[1],
-                            )
+                            Goal(safe_point[0], safe_point[1])
                         )
-
                         print(f"Safe point: {safe_point}")
-
                     else:
                         self.env.robot.set_velocity(0.0, 0.0)
-
                 else:
-                    dist_to_safe_point = np.linalg.norm(
-                        [
-                            robot_pose.px - safe_point[0],
-                            robot_pose.py - safe_point[1],
-                        ]
-                    )
-
+                    dist_to_safe_point = (
+                        (robot_pose.px - safe_point[0]) ** 2
+                        + (robot_pose.py - safe_point[1]) ** 2
+                    ) ** 0.5
                     if dist_to_safe_point < 0.2:
                         safe_point = None
                         self.current_safe_point = None
 
-            # ---------------------------------------------------------
-            # 4. Intrusion point left sensor range -> return toward it.
-            # ---------------------------------------------------------
             if not intrusion_point_observable:
                 returning = True
                 safe_point = None
                 self.current_safe_point = None
-
                 self.env.robot.set_goal_position(
-                    Goal(
-                        pose_before_avoidance.px,
-                        pose_before_avoidance.py,
-                    )
+                    Goal(pose_before_avoidance.px, pose_before_avoidance.py)
                 )
 
-            # ---------------------------------------------------------
-            # 5. Step simulation.
-            # ---------------------------------------------------------
             step()
-
-            # Update pose after movement.
             robot_pose = self.env.robot.pose
 
-            # ---------------------------------------------------------
-            # 6. If returning, check whether intrusion point is reached.
-            # ---------------------------------------------------------
             if returning:
-                dist_to_intrusion_point = np.linalg.norm(
-                    [
-                        robot_pose.px - pose_before_avoidance.px,
-                        robot_pose.py - pose_before_avoidance.py,
-                    ]
-                )
-
+                dist_to_intrusion_point = (
+                    (robot_pose.px - pose_before_avoidance.px) ** 2
+                    + (robot_pose.py - pose_before_avoidance.py) ** 2
+                ) ** 0.5
                 if dist_to_intrusion_point < 0.2:
                     print("Returned to original sweep path.")
-
                     self.env.robot.set_goal_position(deepcopy(goal_before_avoidance))
-
                     self.avoiding_obstacle = False
                     returning = False
                     safe_point = None
                     self.current_safe_point = None
                     break
+
             renderer.refresh(self.env, mission=self)
             if returning:
                 if not intrusion_point_observable:
                     print(
-                        f"Returning to original path because intrusion point is out of sensor range. "
-                        f"({pose_before_avoidance.px:.2f}, {pose_before_avoidance.py:.2f})"
+                        "Returning to original path because intrusion point is out "
+                        f"of sensor range. ({pose_before_avoidance.px:.2f}, "
+                        f"{pose_before_avoidance.py:.2f})"
                     )
                 else:
                     print(
-                        f"Returning to original path because it is safe again. "
+                        "Returning to original path because it is safe again. "
                         f"({pose_before_avoidance.px:.2f}, {pose_before_avoidance.py:.2f})"
                     )
             if self.env.did_collision_happened():
-                print(f"Collision detected!")
+                print("Collision detected!")
