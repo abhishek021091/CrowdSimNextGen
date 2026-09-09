@@ -36,7 +36,7 @@ class SAT:
     # TODO: source from config (e.g. agent.config["safety"]) rather than
     # a hardcoded constant -- see project convention of config-driven
     # tunables (env.toml / pedestrians.toml / robot.toml).
-    TIME_HORIZON = 7.0
+    TIME_HORIZON = 1
     _EPS = 1e-8
 
     def __init__(

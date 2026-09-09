@@ -84,10 +84,11 @@ from math import cos, pi, sin
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
+from shapely import length
 from shapely.geometry import GeometryCollection, LineString, MultiPolygon
 from shapely.geometry import Point as ShapelyPoint
 from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.ops import split, unary_union
+from shapely.ops import polygonize, unary_union
 
 from navcore.entities.components.geometry.circle import Circle
 from navcore.entities.components.geometry.polygon import Polygon as NavPolygon
@@ -212,7 +213,7 @@ def decompose_free_space(
     free_space = _free_space(shapely_boundary, shapely_obstacles)
     if free_space.is_empty:
         return DecompositionResult(cells=(), adjacencies=())
-
+    print(free_space)
     initial_subpolygons: list[ShapelyPolygon] = []
     for component in _iter_polygons(free_space):
         initial_subpolygons.extend(_edge_extension_split(component))
@@ -353,7 +354,7 @@ def _is_reflex(
     prev: tuple[float, float],
     curr: tuple[float, float],
     nxt: tuple[float, float],
-    ccw: bool,
+    ccw: bool | None = None,
 ) -> bool:
     x1, y1 = curr[0] - prev[0], curr[1] - prev[1]
     x2, y2 = nxt[0] - curr[0], nxt[1] - curr[1]
@@ -369,21 +370,30 @@ def _edge_extension_split(component: ShapelyPolygon) -> list[ShapelyPolygon]:
     free-space geometry itself, not on obstacles tested independently.
     """
     rings = [component.exterior, *component.interiors]
+    print(f"Rings: {rings}")
 
     reflex_triples: list[
         tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
     ] = []
-    for ring in rings:
+    for ing_index, ring in enumerate(rings):
+        is_hole = ing_index > 0
         coords = [(float(x), float(y)) for x, y in list(ring.coords)[:-1]]
         if len(coords) < 3:
             continue
-        ccw = _signed_area(coords) > 0
+        natural_ccw = _signed_area(coords) > 0
+        # Free space lies on the opposite side of a hole ring from the
+        # hole's own intrinsic interior -- see module docstring's
+        # correctness note. The exterior ring's own natural orientation
+        # already indicates the free-space side and needs no flip.
+        ccw = natural_ccw if not is_hole else not natural_ccw
+        print(f"Ring coords: {coords}, CCW: {ccw}")
         n = len(coords)
         for i in range(n):
             prev, curr, nxt = coords[(i - 1) % n], coords[i], coords[(i + 1) % n]
             if _is_reflex(prev, curr, nxt, ccw):
                 reflex_triples.append((prev, curr, nxt))
-
+    print(f"Ring length: {length}")
+    print(f"Reflex triples: {reflex_triples}")
     if not reflex_triples:
         return [component]
 
@@ -392,23 +402,16 @@ def _edge_extension_split(component: ShapelyPolygon) -> list[ShapelyPolygon]:
 
     cut_segments: list[LineString] = []
     for prev, curr, nxt in reflex_triples:
-        # Extend edge (prev, curr) forward past curr, and edge (curr, nxt)
-        # backward past curr -- the two edges meeting at this reflex
-        # vertex, each continued along its own line into the interior.
         cut_segments.append(_edge_extension_ray(curr, prev, rings, pad))
         cut_segments.append(_edge_extension_ray(curr, nxt, rings, pad))
 
-    geometry = component
-    for segment in cut_segments:
-        geometry = _split_with_line(geometry, segment)
-
-    return [p for p in _iter_polygons(geometry) if p.area > _EPS]
+    return _polygonize_arrangement(component, rings, cut_segments)
 
 
 def _edge_extension_ray(
     vertex: tuple[float, float],
     away_from: tuple[float, float],
-    rings: list,
+    rings: list[tuple[tuple[float, float], ...]],
     pad: float,
 ) -> LineString:
     """Return the ray from ``vertex``, continuing the line through
@@ -435,6 +438,38 @@ def _edge_extension_ray(
 
     end_x, end_y = vx + dx * nearest_distance, vy + dy * nearest_distance
     return LineString([(vx, vy), (end_x, end_y)])
+
+
+def _polygonize_arrangement(
+    component: ShapelyPolygon,
+    rings: list,
+    cut_segments: list[LineString],
+) -> list[ShapelyPolygon]:
+    """Split ``component`` along ``cut_segments`` via planar-arrangement polygonization.
+
+    Why not shapely.ops.split: a cut from a hole's reflex vertex to the
+    exterior boundary doesn't divide the region into two output
+    polygons -- it eliminates the hole, turning an annulus into one
+    simply-connected (still non-convex) polygon. split() has no notion
+    of that merge and silently no-ops on it (see review notes / the
+    bug this replaces). Building the full arrangement -- every ring
+    plus every cut segment, all at once -- and polygonizing it produces
+    every face the combined lines carve the plane into, including
+    whatever's left after a hole is eliminated by a bridging cut.
+    Filtering faces down to the ones actually inside ``component``
+    (which excludes hole interiors by definition) discards the
+    leftover "inside the hole" face automatically -- no separate
+    keyhole-splicing logic needed for that case, and exterior-to-
+    exterior cuts fall out of the same code path for free.
+    """
+    arrangement = unary_union(list(rings) + cut_segments)
+    faces = []
+    for face in polygonize(arrangement):
+        if face.area <= _EPS:
+            continue
+        if component.buffer(_EPS).contains(face.representative_point()):
+            faces.append(face)
+    return faces
 
 
 def _extract_ray_hit_coordinates(geometry) -> list[tuple[float, float]]:
