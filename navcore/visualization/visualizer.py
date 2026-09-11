@@ -62,7 +62,7 @@ class Visualizer:
         decomposition: Sticky cell overlay -- see set_decomposition().
     """
 
-    def __init__(self, local_view_size: float = 5.0) -> None:
+    def __init__(self, local_view_size: float = 10.0) -> None:
         env_path = Path(navcore.configs.__file__).parent / "env.toml"
         with open(env_path, "rb") as f:
             arena = tomllib.load(f)["arenaSize"]
@@ -175,34 +175,35 @@ class Visualizer:
 
     # -- local ("radar") view -------------------------------------------------
 
+    # -- local ("radar") view -------------------------------------------------
+
     def _draw_local_view(self, env: Environment, mission) -> None:
         """Redraw the robot-centered local view, reusing the same
-        sub-visualizers as the main view, then clip it to a circle
-        matching the robot's live sensor range.
+        sub-visualizers as the main view.
 
-        Falls back to ``local_view_size / 2`` as the radius if the robot
-        has no sensor yet (e.g. before the episode is fully built) --
-        this should be transient, not a steady-state condition.
+        The view is a fixed-size square window centered on the robot --
+        not clipped to the sensor-range circle -- so it shows a
+        consistent 10m x 10m area regardless of the robot's sensor
+        configuration. Falls back to ``local_view_size`` if the robot
+        has no pose yet (should be transient, not steady-state).
         """
         self.ax_local.clear()
         if env.robot.pose is None:
             return
 
-        radius = (
-            env.robot.sensor.range
-            if env.robot.sensor is not None
-            else self.local_view_size / 2.0
-        )
+        half_extent = self.local_view_size
         cx, cy = env.robot.pose.px, env.robot.pose.py
 
-        self.ax_local.set_xlim(cx - radius, cx + radius)
-        self.ax_local.set_ylim(cy - radius, cy + radius)
+        self.ax_local.set_xlim(cx - half_extent, cx + half_extent)
+        self.ax_local.set_ylim(cy - half_extent, cy + half_extent)
         self.ax_local.set_aspect("equal")
         self.ax_local.set_facecolor("white")
         self.ax_local.set_xticks([])
         self.ax_local.set_yticks([])
         for spine in self.ax_local.spines.values():
-            spine.set_visible(False)
+            spine.set_visible(True)
+            spine.set_edgecolor("black")
+            spine.set_linewidth(1.5)
 
         if self.decomposition is not None:
             CellVisualizer(self.decomposition, self.ax_local).draw()
@@ -210,8 +211,6 @@ class Visualizer:
         CrowdVisualizer(env, self.ax_local).draw()
         ObstacleVisualizer(env, self.ax_local).draw()
         RobotVisualizer(env, self.ax_local, mission=mission).draw()
-
-        self._clip_local_view_to_circle(cx, cy, radius)
 
     def _clip_local_view_to_circle(self, cx: float, cy: float, radius: float) -> None:
         """Clip every artist drawn in ``ax_local`` to a circle of

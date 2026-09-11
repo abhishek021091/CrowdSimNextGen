@@ -33,6 +33,7 @@ from navcore.entities.groups.group import Group
 
 #: Resolves an agent id to its live ``Agent`` instance.
 AgentLookup = Callable[[int], Pedestrian]
+FOLLOW_DISTANCE_THRESHOLD = 0.5  #: meters
 
 
 class GroupGoalReachingMission:
@@ -103,10 +104,24 @@ class GroupGoalReachingMission:
                 f"Leader {self.group.leader_id!r} has no pose yet; "
                 f"cannot compute a formation target."
             )
+        if ped.pose is None:
+            raise RuntimeError(
+                f"Follower {self.agent_id!r} has no pose yet; "
+                f"cannot decide whether to follow or target the group goal."
+            )
 
         leader_position = Vector2(leader.pose.px, leader.pose.py)
+        follower_position = Vector2(ped.pose.px, ped.pose.py)
+        distance_to_leader = follower_position.distance_to(leader_position)
 
-        ped.goal = Goal(
-            leader_position.x + self.formation_offset.x,
-            leader_position.y + self.formation_offset.y,
-        )
+        if distance_to_leader > FOLLOW_DISTANCE_THRESHOLD:
+            # Out of formation: converge back on the formation slot first.
+            ped.goal = Goal(
+                leader_position.x + self.formation_offset.x,
+                leader_position.y + self.formation_offset.y,
+            )
+        else:
+            # Already with the leader: make real progress toward the
+            # destination instead of chasing the leader's exact position
+            # forever.
+            ped.goal = Goal(self.group.goal.gx, self.group.goal.gy)
