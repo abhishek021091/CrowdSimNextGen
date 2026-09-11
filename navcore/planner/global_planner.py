@@ -309,10 +309,6 @@ class GlobalPlanner:
     # -- per-step drivers -------------------------------------------------
 
     def _run_sweep_step(self, step: TraversalStep) -> None:
-        """Sweep one cell, following test_sweep.py._update_mission's loop
-        order exactly: tick, then check/react, then (maybe) advance the
-        lane goal.
-        """
         mission = SweepingMission.for_traversal_step(step, self.env)
         self.current_mission = mission
         mission.reach_closest_corner()
@@ -322,7 +318,7 @@ class GlobalPlanner:
             self.visualizer.refresh(self.env, mission=mission)
 
             predictor = self._collision_predictor()
-            if predictor.checkIntrusionSAT():
+            if mission.avoiding_obstacle or predictor.checkIntrusionSAT():
                 mission.avoid_crowd(
                     predictor=predictor,
                     safe_point_finder=self._safe_point_finder,

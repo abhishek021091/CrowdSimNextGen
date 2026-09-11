@@ -86,15 +86,14 @@ class SweepTest:
 
         predictor = self._collision_predictor()
 
-        # Only enter avoidance if the robot's *current* planned path is
-        # actually unsafe -- previously this ran unconditionally every tick.
-        if predictor.checkIntrusionSAT():
+        # Keep driving avoid_crowd every tick while it's active, not just on
+        # the tick intrusion was first detected -- avoid_crowd now resolves
+        # over multiple ticks instead of blocking internally.
+        if self.mission.avoiding_obstacle or predictor.checkIntrusionSAT():
             self.mission.avoid_crowd(
                 predictor=predictor,
                 safe_point_finder=self._safe_point_finder,
             )
-            # Avoidance only selects the next temporary goal. This outer
-            # runner performs the following simulation tick.
             return
 
         if result.robot_reached_goal:
@@ -133,8 +132,12 @@ class SweepTest:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Navcore task switchboard")
-    parser.add_argument("mode", choices=("coverage", "goal", "waypoint"), nargs="?", default="coverage")
-    parser.add_argument("--waypoint", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0))
+    parser.add_argument(
+        "mode", choices=("coverage", "goal", "waypoint"), nargs="?", default="coverage"
+    )
+    parser.add_argument(
+        "--waypoint", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0)
+    )
     args = parser.parse_args()
     if args.mode == "coverage":
         print(GlobalPlanner().run())
