@@ -399,6 +399,8 @@ class SweepingMission:
         aborted). See module docstring for the non-rectangular-cell
         approximation caveat.
         """
+        if not self.started:
+            return 0.0
         pose = self.env.robot.pose
         current_x = self._lane_start_local_x
         if pose is not None:
@@ -412,7 +414,45 @@ class SweepingMission:
         )
         return self.area_swept
 
-    def avoid_crowd(self, predictor, step, safe_point_finder, renderer) -> None:
+    def avoid_crowd(self, predictor, safe_point_finder) -> None:
+        """Choose one avoidance goal; the caller remains responsible for ticks.
+
+        Call this once per outer-loop iteration while an intrusion is active.
+        It intentionally contains no ``Step`` or rendering dependency.
+        """
+        if not self.avoiding_obstacle:
+            assert self.env.robot.pose is not None and self.env.robot.goal is not None
+            self.avoiding_obstacle = True
+            self.get_data = GetData(deepcopy(self.env.robot.pose), deepcopy(self.env.robot.goal))
+            self._returning_to_sweep = False
+
+        origin = self.get_data.pose_before_avoidance
+        original_goal = self.get_data.goal_before_avoidance
+        assert self.env.robot.pose is not None and self.env.robot.sensor is not None
+        predictor.obs = self.env.robot.sensor.observe(self.env, robot_visible=False)
+        distance = ((self.env.robot.pose.px - origin.px) ** 2 + (self.env.robot.pose.py - origin.py) ** 2) ** 0.5
+        observable = distance < self.env.robot.sensor.range
+        safe = observable and not predictor.checkIntrusionSAT(origin, original_goal)
+
+        if safe or not observable:
+            self._returning_to_sweep = True
+            self.current_safe_point = None
+            self.env.robot.set_goal_position(Goal(origin.px, origin.py))
+        elif not self._returning_to_sweep:
+            safe_point = safe_point_finder.find_safe_point(self.env.robot.pose)
+            self.current_safe_point = safe_point
+            if safe_point is None:
+                self.env.robot.set_velocity(0.0, 0.0)
+            else:
+                self.env.robot.set_goal_position(Goal(*safe_point))
+
+        if self._returning_to_sweep and distance < 0.2:
+            self.env.robot.set_goal_position(deepcopy(original_goal))
+            self.avoiding_obstacle = False
+            self._returning_to_sweep = False
+            self.current_safe_point = None
+
+    def _blocking_avoid_crowd(self, predictor, step, safe_point_finder, renderer) -> None:
         """Avoid a crowd intrusion and return to the original sweeping path.
 
         Unchanged from the whole-arena version -- see module docstring:

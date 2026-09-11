@@ -1,12 +1,16 @@
+import argparse
 from navcore.avoidace_planner.local_avoidace_planner import LocalAvoidancePlanner
 from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.collision_predictor.sat import SAT
 from navcore.entities.components.pose import Pose
+from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.environment.environment import Environment
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
 from navcore.missions.sweeping import SweepingMission
 from navcore.step.step import Step, StepResult
 from navcore.visualization.visualizer import Visualizer
+from navcore.planner.global_planner import GlobalPlanner
+from navcore.planner.task_planners import GoalPlanner, WaypointPlanner
 
 
 class SafePointFinder:
@@ -34,7 +38,17 @@ class SweepTest:
         self.env_builder = EnvironmentBuilder()
         self.env = self.env_builder.build_environment()
 
-        self.mission = SweepingMission(self.env)
+        half_width = float(self.env.info.arena_width) / 2.0
+        half_height = float(self.env.info.arena_height) / 2.0
+        self.mission = SweepingMission(
+            self.env,
+            cell_vertices=(
+                Vector2(-half_width, -half_height),
+                Vector2(half_width, -half_height),
+                Vector2(half_width, half_height),
+                Vector2(-half_width, half_height),
+            ),
+        )
 
         self._planner = DecentralizedORCAPlanner(
             config_file="orca.toml",
@@ -77,13 +91,10 @@ class SweepTest:
         if predictor.checkIntrusionSAT():
             self.mission.avoid_crowd(
                 predictor=predictor,
-                step=self._step.step,
                 safe_point_finder=self._safe_point_finder,
-                renderer=self.visualizer,
             )
-            # avoid_crowd blocks until fully resolved (see flagged
-            # structural issue above) -- by the time control returns
-            # here, avoiding_obstacle is already False.
+            # Avoidance only selects the next temporary goal. This outer
+            # runner performs the following simulation tick.
             return
 
         if result.robot_reached_goal:
@@ -121,4 +132,13 @@ class SweepTest:
 
 
 if __name__ == "__main__":
-    SweepTest().run_simulation()
+    parser = argparse.ArgumentParser(description="Navcore task switchboard")
+    parser.add_argument("mode", choices=("coverage", "goal", "waypoint"), nargs="?", default="coverage")
+    parser.add_argument("--waypoint", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0))
+    args = parser.parse_args()
+    if args.mode == "coverage":
+        print(GlobalPlanner().run())
+    elif args.mode == "goal":
+        print(GoalPlanner().run().report())
+    else:
+        print(WaypointPlanner(Vector2(*args.waypoint)).run().report())

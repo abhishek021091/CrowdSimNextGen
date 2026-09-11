@@ -83,6 +83,7 @@ class Step:
         env: Environment,
         robot_visible: bool,
         robot_mission: Mission | None = None,
+        crowd_missions: dict[int, Mission] | None = None,
         rand: np.random.Generator | None = None,
     ) -> None:
         self.env = env
@@ -92,7 +93,6 @@ class Step:
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
-        crowd_missions: dict[int, Mission] | None = (None,)
         self.crowd_missions: dict[int, Mission] = crowd_missions or {}
         self.rand = rand if rand is not None else np.random.default_rng()
 

@@ -87,7 +87,7 @@ class Visualizer:
     # -- construction ------------------------------------------------------
 
     def _init_local_view(self) -> None:
-        self.fig_local, self.ax_local = plt.subplots(figsize=(5, 5))
+        self.fig_local, self.ax_local = plt.subplots(figsize=(10, 10))
         self.fig_local.canvas.manager.set_window_title("CrowdSimNextGen - Robot View")
         self.fig_local.show()  # Same one-time show as the main figure.
         self._dock_local_view_beside_main()

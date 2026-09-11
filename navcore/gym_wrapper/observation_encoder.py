@@ -23,6 +23,7 @@ Design choices:
 
 from __future__ import annotations
 
+from collections import deque
 import math
 
 import numpy as np
@@ -47,10 +48,18 @@ class ObservationEncoder:
             kept and farther ones are dropped.
     """
 
-    def __init__(self, max_neighbors: int) -> None:
+    def __init__(self, max_neighbors: int, history_steps: int = 8) -> None:
         if max_neighbors <= 0:
             raise ValueError(f"max_neighbors must be positive, got {max_neighbors!r}.")
+        if history_steps <= 0:
+            raise ValueError(f"history_steps must be positive, got {history_steps!r}.")
         self.max_neighbors = max_neighbors
+        self.history_steps = history_steps
+        self._neighbor_history: dict[int, deque[np.ndarray]] = {}
+
+    def reset(self) -> None:
+        """Discard all temporal state at an episode boundary."""
+        self._neighbor_history.clear()
 
     @property
     def space(self) -> spaces.Dict:
@@ -67,6 +76,19 @@ class ObservationEncoder:
                     dtype=np.float32,
                 ),
                 "neighbor_mask": spaces.MultiBinary(self.max_neighbors),
+                "neighbor_history": spaces.Box(
+                    -inf,
+                    inf,
+                    shape=(
+                        self.history_steps,
+                        self.max_neighbors,
+                        _NEIGHBOR_FEATURES,
+                    ),
+                    dtype=np.float32,
+                ),
+                "neighbor_history_mask": spaces.MultiBinary(
+                    (self.history_steps, self.max_neighbors)
+                ),
             }
         )
 
@@ -99,7 +121,7 @@ class ObservationEncoder:
             dtype=np.float32,
         )
 
-        neighbors, mask = self._encode_neighbors(
+        neighbors, mask, history, history_mask = self._encode_neighbors(
             robot.pose.px, robot.pose.py, neighbor_obs
         )
 
@@ -107,6 +129,8 @@ class ObservationEncoder:
             "robot": robot_features,
             "neighbors": neighbors,
             "neighbor_mask": mask,
+            "neighbor_history": history,
+            "neighbor_history_mask": history_mask,
         }
 
     def _encode_neighbors(
@@ -114,23 +138,53 @@ class ObservationEncoder:
         robot_x: float,
         robot_y: float,
         observation: dict[int, ObservableState],
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         def distance(obs: ObservableState) -> float:
             return math.hypot(obs.pose.px - robot_x, obs.pose.py - robot_y)
 
-        nearest = sorted(observation.values(), key=distance)[: self.max_neighbors]
+        features_by_id = {
+            pedestrian_id: self._neighbor_features(robot_x, robot_y, obs)
+            for pedestrian_id, obs in observation.items()
+        }
+        for pedestrian_id, features in features_by_id.items():
+            track = self._neighbor_history.setdefault(
+                pedestrian_id, deque(maxlen=self.history_steps)
+            )
+            track.append(features)
+
+        nearest = sorted(
+            observation.items(), key=lambda item: distance(item[1])
+        )[: self.max_neighbors]
 
         neighbors = np.zeros((self.max_neighbors, _NEIGHBOR_FEATURES), dtype=np.float32)
         mask = np.zeros(self.max_neighbors, dtype=np.int8)
+        history = np.zeros(
+            (self.history_steps, self.max_neighbors, _NEIGHBOR_FEATURES),
+            dtype=np.float32,
+        )
+        history_mask = np.zeros((self.history_steps, self.max_neighbors), dtype=np.int8)
 
-        for i, obs in enumerate(nearest):
-            neighbors[i] = (
+        for i, (pedestrian_id, _) in enumerate(nearest):
+            neighbors[i] = features_by_id[pedestrian_id]
+            mask[i] = 1
+            track = self._neighbor_history[pedestrian_id]
+            start = self.history_steps - len(track)
+            history[start:, i] = track
+            history_mask[start:, i] = 1
+
+        return neighbors, mask, history, history_mask
+
+    @staticmethod
+    def _neighbor_features(
+        robot_x: float, robot_y: float, obs: ObservableState
+    ) -> np.ndarray:
+        return np.asarray(
+            (
                 obs.pose.px - robot_x,
                 obs.pose.py - robot_y,
                 obs.velocity.vx,
                 obs.velocity.vy,
                 obs.radius,
-            )
-            mask[i] = 1
-
-        return neighbors, mask
+            ),
+            dtype=np.float32,
+        )

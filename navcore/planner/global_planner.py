@@ -325,9 +325,7 @@ class GlobalPlanner:
             if predictor.checkIntrusionSAT():
                 mission.avoid_crowd(
                     predictor=predictor,
-                    step=self._tick,
                     safe_point_finder=self._safe_point_finder,
-                    renderer=self.visualizer,
                 )
                 continue
 

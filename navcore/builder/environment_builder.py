@@ -17,8 +17,13 @@ class EnvironmentBuilder:
     with open(Path(env_path), "rb") as f:
         env_config = tomllib.load(f)
 
-    def __init__(self, rand: np.random.Generator | None = None):
+    def __init__(
+        self,
+        rand: np.random.Generator | None = None,
+        include_static_obstacles: bool = True,
+    ):
         self.info = EnvironmentInfo()
+        self.include_static_obstacles = include_static_obstacles
         self.rand = (
             rand
             if rand is not None
@@ -31,7 +36,8 @@ class EnvironmentBuilder:
     def build_environment(self) -> Environment:
 
         # self.obstacle_builder.build_boundary()
-        self.obstacle_builder.build_table()
+        if self.include_static_obstacles:
+            self.obstacle_builder.build_table()
         self.crowd_builder.build_crowd()
         self.crowd_builder.build_groups()
         self.robot_builder.build_robot()
@@ -61,12 +67,13 @@ class EnvironmentBuilder:
         crowd_builder = CrowdBuilder(rand)
         robot_builder = RobotBuilder(rand)
         obstacle_builder = ObstacleBuilder(rand)
-        obstacle_builder.build_table()
+        if self.include_static_obstacles:
+            obstacle_builder.build_table()
         crowd_builder.build_crowd()
         crowd_builder.build_groups()
         robot_builder.build_robot()
         return Environment(
-            self.info,
+            EnvironmentInfo(random_seed=random_seed),
             obstacle_builder.obstacles,
             crowd_builder.crowd,
             crowd_builder.groups,

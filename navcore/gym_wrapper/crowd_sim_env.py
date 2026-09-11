@@ -56,18 +56,25 @@ class CrowdSimEnvConfig:
     Attributes:
         action_mode: See module docstring.
         max_neighbors: Fixed neighbor-slot count for observations.
+        history_steps: Temporal frames retained for each visible neighbor.
         max_episode_steps: Truncation limit; independent of the Task's
             own termination logic.
         robot_visible: Whether pedestrians can see the robot in their
             own sensor observations this episode.
+        include_static_obstacles: Whether to build static obstacles for
+            this scenario. CrowdNav-style goal walking defaults to an
+            obstacle-free arena; non-RL EnvironmentBuilder callers retain
+            their existing obstacle-filled default.
         orca_config_file: ORCA reasoning-parameter TOML, forwarded to
             DecentralizedORCAPlanner (see its own docstring).
     """
 
     action_mode: ActionMode = ActionMode.VELOCITY
     max_neighbors: int = 10
+    history_steps: int = 8
     max_episode_steps: int = 500
     robot_visible: bool = False
+    include_static_obstacles: bool = False
     orca_config_file: str = "orca.toml"
 
 
@@ -88,8 +95,13 @@ class CrowdSimEnv(gym.Env):
         self.task = task
         self.config = config if config is not None else CrowdSimEnvConfig()
 
-        self._env_builder = EnvironmentBuilder()
-        self._obs_encoder = ObservationEncoder(max_neighbors=self.config.max_neighbors)
+        self._env_builder = EnvironmentBuilder(
+            include_static_obstacles=self.config.include_static_obstacles
+        )
+        self._obs_encoder = ObservationEncoder(
+            max_neighbors=self.config.max_neighbors,
+            history_steps=self.config.history_steps,
+        )
         self._waypoint_mission: RLWaypointMission | None = None
         self._step_driver: Step | None = None
         self._velocity_override: Velocity | None = None
@@ -120,6 +132,7 @@ class CrowdSimEnv(gym.Env):
         )
         self.env = self._env_builder.reset(random_seed=episode_seed)
         self.task.reset(self.env)
+        self._obs_encoder.reset()
 
         robot_mission = None
         self._waypoint_mission = None
