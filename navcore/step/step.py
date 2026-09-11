@@ -92,6 +92,8 @@ class Step:
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
+        crowd_missions: dict[int, Mission] | None = (None,)
+        self.crowd_missions: dict[int, Mission] = crowd_missions or {}
         self.rand = rand if rand is not None else np.random.default_rng()
 
     def get_observations(self, agent: Agent) -> dict[int, ObservableState]:
@@ -178,11 +180,10 @@ class Step:
         assert self.env.robot.sensor is not None
         robot_obs = self.get_observations(self.env.robot)
 
-        # target = self._target_for(
-        #     self.env.robot, self.robot_mission, list(robot_obs.values())
-        # )
-        # full_state = self._full_state_for(self.env.robot, target)
-        robot_full_state = self.env.robot.get_full_state()
+        target = self._target_for(
+            self.env.robot, self.robot_mission, list(robot_obs.values())
+        )
+        robot_full_state = self._full_state_for(self.env.robot, target)
 
         robot_velocity, _ = self.planner.compute_velocities(
             self.ROBOT_KEY, robot_full_state, robot_obs
@@ -195,14 +196,14 @@ class Step:
         for ped_id, ped in self.env.crowd.items():
             if self.rand.random() < 0.2 and ped_id % 10 == 0:
                 crowd_velocities[ped_id] = Velocity(0, 0)
-                continue  # Skip this pedestrian with 40% probability
+                continue
             assert ped.sensor is not None
             ped_obs = self.get_observations(ped)
             ped_obs[ped_id] = ped.get_observable_state()
 
-            # mission = self.crowd_missions.get(ped_id)
-            # target = self._target_for(ped, mission, list(ped_obs.values()))
-            ped_full_state = self.env.crowd[ped_id].get_full_state()
+            mission = self.crowd_missions.get(ped_id)
+            target = self._target_for(ped, mission, list(ped_obs.values()))
+            ped_full_state = self._full_state_for(ped, target)
 
             ped_velocity, _ = self.planner.compute_velocities(
                 ped_id, ped_full_state, ped_obs
@@ -288,3 +289,53 @@ class Step:
         if agent_id == self.ROBOT_KEY:
             return self.env.robot
         return self.env.crowd.get(agent_id)
+
+    def _target_for(
+        self,
+        agent: Agent,
+        mission: Mission | None,
+        neighbors: list[ObservableState],
+    ) -> Vector2:
+        """Return the point `agent` should currently move toward.
+
+        Delegates to `mission.get_target()` if a Mission is attached;
+        otherwise falls back to the agent's own persistent `goal`, per
+        the project's "missions are optional" convention (see mission.py).
+
+        Raises:
+            RuntimeError: If `mission` is None and `agent.goal` is also
+                unset.
+        """
+        if mission is not None:
+            return mission.get_target(agent, neighbors)
+
+        if agent.goal is None:
+            raise RuntimeError(
+                f"Agent has no Mission and no goal set; cannot compute a target."
+            )
+        return Vector2(agent.goal.gx, agent.goal.gy)
+
+    def _full_state_for(self, agent: Agent, target: Vector2) -> FullState:
+        """Build a throwaway `FullState` for planning, with `goal` overridden
+        by `target` rather than `agent.goal`.
+
+        This is deliberately NOT `agent.get_full_state()` — that method
+        reads `agent.goal`, which this function must NOT touch (see class
+        docstring: "agent.goal itself is never touched here"). Anything
+        downstream that reads `agent.goal` directly (goal-reached checks,
+        UI, metrics) must keep seeing the agent's real, persistent goal,
+        not a transient mission waypoint.
+
+        Raises:
+            RuntimeError: If `agent.pose` or `agent.velocity` is unset.
+        """
+        if agent.pose is None or agent.velocity is None:
+            raise RuntimeError("Agent must have pose and velocity set.")
+
+        return FullState(
+            pose=agent.pose,
+            goal=Goal(target.x, target.y),
+            velocity=agent.velocity,
+            radius=agent.radius,
+            preferred_speed=agent.v_pref,
+        )
