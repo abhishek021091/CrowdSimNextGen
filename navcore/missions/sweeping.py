@@ -42,7 +42,7 @@ Per-lane clipping, not a fixed rectangle:
     rotated local frame, against the cell's actual edges -- not assumed
     constant across the whole sweep the way a rectangle-arena version
     could assume.
-
+</code_to_edit>
 Area accounting caveat:
     total_area_swept() sums each completed lane's actual clipped width
     times lane spacing. This is still an approximation for
@@ -423,14 +423,19 @@ class SweepingMission:
         if not self.avoiding_obstacle:
             assert self.env.robot.pose is not None and self.env.robot.goal is not None
             self.avoiding_obstacle = True
-            self.get_data = GetData(deepcopy(self.env.robot.pose), deepcopy(self.env.robot.goal))
+            self.get_data = GetData(
+                deepcopy(self.env.robot.pose), deepcopy(self.env.robot.goal)
+            )
             self._returning_to_sweep = False
 
         origin = self.get_data.pose_before_avoidance
         original_goal = self.get_data.goal_before_avoidance
         assert self.env.robot.pose is not None and self.env.robot.sensor is not None
         predictor.obs = self.env.robot.sensor.observe(self.env, robot_visible=False)
-        distance = ((self.env.robot.pose.px - origin.px) ** 2 + (self.env.robot.pose.py - origin.py) ** 2) ** 0.5
+        distance = (
+            (self.env.robot.pose.px - origin.px) ** 2
+            + (self.env.robot.pose.py - origin.py) ** 2
+        ) ** 0.5
         observable = distance < self.env.robot.sensor.range
         safe = observable and not predictor.checkIntrusionSAT(origin, original_goal)
 
@@ -451,108 +456,3 @@ class SweepingMission:
             self.avoiding_obstacle = False
             self._returning_to_sweep = False
             self.current_safe_point = None
-
-    def _blocking_avoid_crowd(self, predictor, step, safe_point_finder, renderer) -> None:
-        """Avoid a crowd intrusion and return to the original sweeping path.
-
-        Unchanged from the whole-arena version -- see module docstring:
-        this never referenced arena bounds or entry_point, so nothing
-        here depends on the cell-based redesign.
-        """
-        self.avoiding_obstacle = True
-        assert self.env.robot.pose is not None and self.env.robot.goal is not None
-        pose_before_avoidance = deepcopy(self.env.robot.pose)
-        goal_before_avoidance = deepcopy(self.env.robot.goal)
-
-        self.get_data = GetData(pose_before_avoidance, goal_before_avoidance)
-
-        safe_point = None
-        self.current_safe_point = None
-        returning = False
-
-        while self.avoiding_obstacle:
-            predictor.obs = self.env.robot.sensor.observe(self.env, robot_visible=False)
-            robot_pose = self.env.robot.pose
-
-            dist_from_intrusion = (
-                (robot_pose.px - pose_before_avoidance.px) ** 2
-                + (robot_pose.py - pose_before_avoidance.py) ** 2
-            ) ** 0.5
-            assert self.env.robot.sensor is not None
-            intrusion_point_observable = (
-                dist_from_intrusion < self.env.robot.sensor.range
-            )
-
-            original_path_safe = False
-            if intrusion_point_observable:
-                original_path_safe = not predictor.checkIntrusionSAT(
-                    pose_before_avoidance, goal_before_avoidance
-                )
-
-            if original_path_safe:
-                returning = True
-                safe_point = None
-                self.current_safe_point = None
-                self.env.robot.set_goal_position(
-                    Goal(pose_before_avoidance.px, pose_before_avoidance.py)
-                )
-            elif not returning:
-                if safe_point is None:
-                    safe_point = safe_point_finder.find_safe_point(self.env.robot.pose)
-                    self.current_safe_point = safe_point
-                    if safe_point is not None:
-                        self.env.robot.set_goal_position(
-                            Goal(safe_point[0], safe_point[1])
-                        )
-                        print(f"Safe point: {safe_point}")
-                    else:
-                        self.env.robot.set_velocity(0.0, 0.0)
-                else:
-                    dist_to_safe_point = (
-                        (robot_pose.px - safe_point[0]) ** 2
-                        + (robot_pose.py - safe_point[1]) ** 2
-                    ) ** 0.5
-                    if dist_to_safe_point < 0.2:
-                        safe_point = None
-                        self.current_safe_point = None
-
-            if not intrusion_point_observable:
-                returning = True
-                safe_point = None
-                self.current_safe_point = None
-                self.env.robot.set_goal_position(
-                    Goal(pose_before_avoidance.px, pose_before_avoidance.py)
-                )
-
-            step()
-            robot_pose = self.env.robot.pose
-
-            if returning:
-                dist_to_intrusion_point = (
-                    (robot_pose.px - pose_before_avoidance.px) ** 2
-                    + (robot_pose.py - pose_before_avoidance.py) ** 2
-                ) ** 0.5
-                if dist_to_intrusion_point < 0.2:
-                    print("Returned to original sweep path.")
-                    self.env.robot.set_goal_position(deepcopy(goal_before_avoidance))
-                    self.avoiding_obstacle = False
-                    returning = False
-                    safe_point = None
-                    self.current_safe_point = None
-                    break
-
-            renderer.refresh(self.env, mission=self)
-            if returning:
-                if not intrusion_point_observable:
-                    print(
-                        "Returning to original path because intrusion point is out "
-                        f"of sensor range. ({pose_before_avoidance.px:.2f}, "
-                        f"{pose_before_avoidance.py:.2f})"
-                    )
-                else:
-                    print(
-                        "Returning to original path because it is safe again. "
-                        f"({pose_before_avoidance.px:.2f}, {pose_before_avoidance.py:.2f})"
-                    )
-            if self.env.did_collision_happened():
-                print("Collision detected!")

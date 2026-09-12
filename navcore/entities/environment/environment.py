@@ -22,6 +22,7 @@ class EnvironmentInfo:
     arena_height: str = env_config["arenaSize"]["height"]
     random_seed: int = env_config["random"]["seed"]
     collision_counter: int = 0
+    goal_reach_tolerance: float = env_config["tolerance"]["goal_reach"]
 
 
 @dataclass

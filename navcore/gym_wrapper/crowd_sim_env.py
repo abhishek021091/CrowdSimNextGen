@@ -145,7 +145,7 @@ class CrowdSimEnv(gym.Env):
 
         planner = DecentralizedORCAPlanner(
             config_file=self.config.orca_config_file,
-            obstacles=self.env.obstacles,
+            # obstacles=self.env.obstacles,
         )
         self._step_driver = Step(
             planner=planner,

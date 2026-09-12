@@ -15,11 +15,6 @@ import math
 from navcore.entities.environment.environment import Environment
 from navcore.missions.goal_reaching import GoalReachingMission
 
-#: Matches Step._compute_velocities's own hardcoded goal-reach radius.
-#: TODO: both should read from one shared config value instead of two
-#: independent hardcoded constants.
-GOAL_REACH_TOLERANCE = 0.5
-
 
 class GoalReachingTask:
     """Navigate the robot to its goal while avoiding collisions.
@@ -78,7 +73,7 @@ class GoalReachingTask:
         return self._reached_goal(env) or collided
 
     def _reached_goal(self, env: Environment) -> bool:
-        return self._distance_to_goal(env) <= GOAL_REACH_TOLERANCE
+        return self._distance_to_goal(env) <= env.info.goal_reach_tolerance
 
     @staticmethod
     def _distance_to_goal(env: Environment) -> float:

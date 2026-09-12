@@ -108,14 +108,6 @@ from navcore.missions.sweeping import SweepingMission
 from navcore.step.step import Step, StepResult
 from navcore.visualization.visualizer import Visualizer
 
-#: Matches Step._compute_velocities's own hardcoded goal-reach radius,
-#: and GoalReachingTask.GOAL_REACH_TOLERANCE. Duplicated here for the
-#: same reason those two duplicate it from each other (see that file's
-#: own TODO) -- all three should eventually read one shared config
-#: value instead of three independent hardcoded constants.
-GOAL_REACH_TOLERANCE = 0.5
-#: How close is "arrived" at a temporary safe point during a detour,
-#: matching SweepingMission.avoid_crowd's own hardcoded 0.2.
 SAFE_POINT_TOLERANCE = 0.2
 
 
@@ -359,7 +351,7 @@ class GlobalPlanner:
             if (
                 not avoiding
                 and _distance(robot_pose.px, robot_pose.py, target.x, target.y)
-                <= GOAL_REACH_TOLERANCE
+                <= self.env.info.goal_reach_tolerance
             ):
                 return
 
