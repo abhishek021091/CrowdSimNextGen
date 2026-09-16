@@ -31,7 +31,11 @@ def main() -> None:
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--output", type=str, default="./checkpoints/gst_predictor.pt")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="./navcore/training/gst_predictor/checkpoints/gst_predictor.pt",
+    )
     args = parser.parse_args()
 
     predictor_config = GSTPredictorConfig(

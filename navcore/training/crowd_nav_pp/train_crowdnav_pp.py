@@ -16,7 +16,6 @@ from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimE
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.crowd_nav_pp.ppo_trainer import CrowdNavPPTrainer, PPOConfig
-from navcore.training.crowd_nav_pp.rollou
 
 
 def main() -> None:
@@ -37,7 +36,7 @@ def main() -> None:
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
+    parser.add_argument("--checkpoint-dir", type=str, default="./navcore/training/crowd_nav_pp/checkpoints")
     parser.add_argument("--checkpoint-every", type=int, default=200)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
