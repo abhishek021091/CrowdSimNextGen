@@ -150,7 +150,7 @@ class Step:
                     ]
                 ]
             )
-            <= 0.5
+            <= self.env.info.goal_reach_tolerance
         ):
             robot_reached_goal = True
         else:
@@ -160,7 +160,7 @@ class Step:
             assert ped.pose is not None and ped.goal is not None
             if (
                 np.linalg.norm([ped.pose.px - ped.goal.gx, ped.pose.py - ped.goal.gy])
-                > 0.5
+                <= self.env.info.goal_reach_tolerance
             ):
                 pedestrian_reached_goals[ped.id] = False
             else:
