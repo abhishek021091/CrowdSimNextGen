@@ -112,6 +112,7 @@ from navcore.policies.crowdnav_pp.temporal_encoder import (
     TemporalEncoder,
     TemporalEncoderConfig,
 )
+from navcore.policies.gst_predictor.gst_predictor import GSTPredictor
 
 #: Index range of (vx, vy) within one ObservationEncoder neighbor feature
 #: vector -- see navcore.gym_wrapper.observation_encoder's module
@@ -175,15 +176,15 @@ class CrowdNavPPPolicyConfig:
     node_output_size: int = 256
     actor_critic_hidden_size: int = 256
     action_dim: int = 2
+    use_gst_prediction: bool = False
+    gst_pred_length: int = 5
 
     @property
     def spatial_edge_feature_dim(self) -> int:
-        """Width of one neighbor's combined instantaneous+temporal feature.
-
-        Derived, not stored, so it can never drift out of sync with
-        ``neighbor_feature_dim``/``temporal_hidden_size``.
-        """
-        return self.neighbor_feature_dim + self.temporal_hidden_size
+        base = self.neighbor_feature_dim + self.temporal_hidden_size
+        if self.use_gst_prediction:
+            base += self.gst_pred_length * 2
+        return base
 
 
 class CrowdNavPPPolicy(nn.Module):
@@ -197,12 +198,22 @@ class CrowdNavPPPolicy(nn.Module):
 
     Attributes:
         config: This policy's hyperparameters.
+        gst_predictor: A pretrained GSTPredictor for making future trajectory predictions.
     """
 
-    def __init__(self, config: CrowdNavPPPolicyConfig) -> None:
+    def __init__(
+        self, config: CrowdNavPPPolicyConfig, gst_predictor: GSTPredictor | None = None
+    ) -> None:
         super().__init__()
         self.config = config
 
+        if config.use_gst_prediction and gst_predictor is None:
+            raise ValueError(
+                "use_gst_prediction=True requires a pretrained gst_predictor "
+                "(see GSTPredictorTrainer.load_predictor) -- GST is trained "
+                "separately, never jointly with this policy."
+            )
+        self.gst_predictor = gst_predictor
         self.robot_encoder = RobotStateEncoder(
             RobotStateEncoderConfig(
                 robot_feature_dim=config.robot_feature_dim,
@@ -320,9 +331,26 @@ class CrowdNavPPPolicy(nn.Module):
         history_mask = neighbor_history_mask.transpose(0, 1).to(neighbor_history.dtype)
         temporal_embedding = self.temporal_encoder(motion_history, history_mask)
 
-        spatial_edge_features = torch.cat(
-            (neighbor_features, temporal_embedding), dim=-1
-        )
+        if self.config.use_gst_prediction:
+            assert self.gst_predictor is not None
+            # neighbor_history[..., 0:2] is ObservationEncoder's rel_px/rel_py --
+            # robot-relative, which is sufficient for pairwise human-human
+            # geometry (see gst_predictor.py's module docstring). transpose(1, 2)
+            # swaps [nenv, history_steps, max_neighbors, ...] into GSTPredictor's
+            # expected [nenv, max_neighbors, history_steps, ...].
+            hist_pos = neighbor_history[..., 0:2].transpose(1, 2)
+            hist_vel = neighbor_history[..., 2:4].transpose(1, 2)
+            hist_mask = neighbor_history_mask.transpose(1, 2)
+            pred_features = self.gst_predictor.predict_features(
+                hist_pos, hist_vel, hist_mask
+            )
+            spatial_edge_features = torch.cat(
+                (neighbor_features, temporal_embedding, pred_features), dim=-1
+            )
+        else:
+            spatial_edge_features = torch.cat(
+                (neighbor_features, temporal_embedding), dim=-1
+            )
 
         # HumanHumanAttention/RobotHumanAttention carry an explicit
         # seq_len axis (see their own docstrings); this policy is
