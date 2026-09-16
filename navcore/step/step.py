@@ -162,9 +162,9 @@ class Step:
                 np.linalg.norm([ped.pose.px - ped.goal.gx, ped.pose.py - ped.goal.gy])
                 <= self.env.info.goal_reach_tolerance
             ):
-                pedestrian_reached_goals[ped.id] = False
-            else:
                 pedestrian_reached_goals[ped.id] = True
+            else:
+                pedestrian_reached_goals[ped.id] = False
         return StepResult(
             robot_velocity=robot_velocity,
             robot_reached_goal=robot_reached_goal,

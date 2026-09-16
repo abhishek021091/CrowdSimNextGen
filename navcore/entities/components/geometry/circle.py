@@ -34,8 +34,8 @@ class Circle(Geometry):
             env = tomllib.load(f)
 
         if (
-            env["arenaSize"]["width"] <= self.center[0]
-            or -env["arenaSize"]["width"] >= self.center[0]
+            env["arenaSize"]["width"] <= self.center[0] / 2
+            or -env["arenaSize"]["width"] >= self.center[0] / 2
         ):
             raise ValueError(
                 f"Circle center x-coordinate is out of bounds, got {self.center[0]}."

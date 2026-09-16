@@ -37,15 +37,15 @@ class Rectangle(Geometry):
         """
 
         if (
-            self.env_config["arenaSize"]["width"] <= self.center[0]
-            or -self.env_config["arenaSize"]["width"] >= self.center[0]
+            self.env_config["arenaSize"]["width"] <= self.center[0] / 2
+            or -self.env_config["arenaSize"]["width"] >= self.center[0] / 2
         ):
             raise ValueError(
                 f"Rectangle center x-coordinate is out of bounds, got {self.center[0]}."
             )
         if (
-            self.env_config["arenaSize"]["height"] <= self.center[1]
-            or -self.env_config["arenaSize"]["height"] >= self.center[1]
+            self.env_config["arenaSize"]["height"] <= self.center[1] / 2
+            or -self.env_config["arenaSize"]["height"] >= self.center[1] / 2
         ):
             raise ValueError(
                 f"Rectangle center y-coordinate is out of bounds, got {self.center[1]}."
