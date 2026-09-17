@@ -1,9 +1,10 @@
-# navcore/training/train_crowdnav_pp.py
-"""CLI entry point: train CrowdNavPPPolicy with PPO against CrowdSimEnv.
+# navcore/training/crowd_nav_pp/train_crowdnav_pp.py
+"""CLI entry point: train CrowdNavPPPolicy with PPO against n_envs
+parallel CrowdSimEnv copies.
 
 Run directly:
 
-    python -m navcore.training.train_crowdnav_pp
+    python -m navcore.training.train_crowdnav_pp --n-envs 16
 """
 
 from __future__ import annotations
@@ -16,19 +17,22 @@ from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimE
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.crowd_nav_pp.ppo_trainer import CrowdNavPPTrainer, PPOConfig
+from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 from navcore.training.gst_predictor.gst_predictor_trainer import GSTPredictorTrainer
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train CrowdNav++ via PPO")
     parser.add_argument("--total-timesteps", type=int, default=200_000)
+    parser.add_argument("--n-envs", type=int, default=16)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--n-epochs", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.0)
+    parser.add_argument("--clip-range-vf", type=float, default=0.2)
+    parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--max-neighbors", type=int, default=10)
@@ -44,19 +48,8 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint-every", type=int, default=200)
     parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument(
-        "--use-gst-prediction",
-        action="store_true",
-        help="Feed a pretrained GST predictor's future-displacement features "
-        "into the policy. Requires --gst-checkpoint.",
-    )
-    parser.add_argument(
-        "--gst-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a GST predictor checkpoint saved by "
-        "GSTPredictorTrainer.save() / train_gst_predictor.py.",
-    )
+    parser.add_argument("--use-gst-prediction", action="store_true", default=False)
+    parser.add_argument("--gst-checkpoint", type=str, default=None)
     args = parser.parse_args()
 
     if args.use_gst_prediction and not args.gst_checkpoint:
@@ -68,7 +61,15 @@ def main() -> None:
         history_steps=args.history_steps,
         max_episode_steps=args.max_episode_steps,
     )
-    env = CrowdSimEnv(GoalReachingTask(), env_config)
+
+    # Each parallel slot needs its own CrowdSimEnv + GoalReachingTask instance
+    # (GoalReachingTask carries per-episode state -- see its reset()) -- so
+    # build fresh factories, not shared objects.
+    env_fns = [
+        (lambda: CrowdSimEnv(GoalReachingTask(), env_config))
+        for _ in range(args.n_envs)
+    ]
+    env = VecCrowdSimEnv(env_fns)
 
     gst_predictor = None
     if args.use_gst_prediction:
@@ -91,6 +92,7 @@ def main() -> None:
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         clip_range=args.clip_range,
+        clip_range_vf=args.clip_range_vf,
         ent_coef=args.ent_coef,
         vf_coef=args.vf_coef,
         max_grad_norm=args.max_grad_norm,

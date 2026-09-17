@@ -1,23 +1,19 @@
-# navcore/training/rollout_buffer.py
-"""RecurrentRolloutBuffer: single-environment, GAE-based rollout storage
+# navcore/training/crowd_nav_pp/rollout_buffer.py
+"""RecurrentRolloutBuffer: multi-environment, GAE-based rollout storage
 for CrowdNavPPPolicy's PPO training loop.
 
-Scope note (Slice 1):
-    Buffers exactly one trajectory from one CrowdSimEnv instance,
-    spanning n_steps ticks (which may cross zero or more episode
-    boundaries -- not_done_mask/dones record exactly where). PPO's
-    clipped-surrogate update recomputes the policy's forward pass
-    sequentially over the *entire* buffered trajectory every epoch (see
-    ppo_trainer.py) rather than splitting it into independently-seeded
-    truncated-BPTT chunks across parallel environments -- this matches
-    RecurrentNodeUpdate's own documented scope (single-timestep GRU
-    update only; the batched multi-timestep path is explicitly deferred
-    there until a real training loop exists to design it against). This
-    *is* that training loop, and it deliberately stays on the
-    single-timestep path rather than silently inventing the deferred
-    batched path here. Multi-env vectorization + chunked BPTT is a
-    natural follow-up once this path is validated -- flagged, not
-    implemented.
+Scope note (Slice 2 -- supersedes Slice 1's single-env note):
+    Buffers n_envs trajectories collected in lockstep from a VecCrowdSimEnv,
+    spanning n_steps ticks each. Every per-step field (obs, actions,
+    log_probs, values, rewards, dones, not_done_masks) carries a leading
+    n_envs axis; GAE is computed independently per env-column (the
+    recursion in compute_returns_and_advantages is elementwise over numpy
+    arrays, so it naturally decorrelates envs without special-casing).
+    PPO's clipped-surrogate update still recomputes the policy's forward
+    pass sequentially over the whole buffered T-step window every epoch
+    (see ppo_trainer.py) -- this is unchanged from Slice 1 and still
+    matches RecurrentNodeUpdate's documented single-timestep-only scope;
+    only the *batch* dimension at each timestep grew from 1 to n_envs.
 """
 
 from __future__ import annotations
@@ -39,31 +35,35 @@ _OBS_KEYS = (
 
 @dataclass(slots=True)
 class RecurrentRolloutBuffer:
-    """Accumulates one rollout's transitions, then computes GAE targets.
+    """Accumulates one rollout's transitions across n_envs, then computes GAE targets.
 
     Attributes:
         device: Where returned tensors live.
-        initial_hidden_state: The GRU hidden state that existed
-            immediately before this buffer's first stored step.
-            ``ppo_trainer.py``'s recompute pass starts from this exact
+        n_envs: Number of parallel environments this buffer's fields are
+            batched over. Set by start(), from initial_hidden_state's
+            leading dim.
+        initial_hidden_state: The GRU hidden state ([n_envs, hidden_size])
+            that existed immediately before this buffer's first stored
+            step. ppo_trainer.py's recompute pass starts from this exact
             (detached) value every epoch, so a whole rollout's worth of
             hidden-state history never needs to be stored -- only the
-            seed, plus each step's ``not_done_mask`` to reproduce the
-            same reset points during recompute.
+            seed, plus each step's not_done_mask to reproduce the same
+            reset points during recompute.
     """
 
     device: torch.device
+    n_envs: int = 1
     initial_hidden_state: Tensor | None = None
 
     _obs: dict[str, list[np.ndarray]] = field(
         default_factory=lambda: {k: [] for k in _OBS_KEYS}
     )
     _actions: list[np.ndarray] = field(default_factory=list)
-    _log_probs: list[float] = field(default_factory=list)
-    _values: list[float] = field(default_factory=list)
-    _rewards: list[float] = field(default_factory=list)
-    _dones: list[bool] = field(default_factory=list)
-    _not_done_masks: list[float] = field(default_factory=list)
+    _log_probs: list[np.ndarray] = field(default_factory=list)
+    _values: list[np.ndarray] = field(default_factory=list)
+    _rewards: list[np.ndarray] = field(default_factory=list)
+    _dones: list[np.ndarray] = field(default_factory=list)
+    _not_done_masks: list[np.ndarray] = field(default_factory=list)
 
     _advantages: Tensor | None = None
     _returns: Tensor | None = None
@@ -84,35 +84,34 @@ class RecurrentRolloutBuffer:
         self._advantages = None
         self._returns = None
         self.initial_hidden_state = initial_hidden_state.detach().clone()
+        self.n_envs = initial_hidden_state.shape[0]
 
     def add(
         self,
         obs: dict[str, np.ndarray],
-        not_done_mask: float,
+        not_done_mask: np.ndarray,
         action: np.ndarray,
-        log_prob: float,
-        value: float,
-        reward: float,
-        done: bool,
+        log_prob: np.ndarray,
+        value: np.ndarray,
+        reward: np.ndarray,
+        done: np.ndarray,
     ) -> None:
-        """Record one collected transition.
+        """Record one collected timestep, across all n_envs.
 
         Args:
-            obs: This step's ``ObservationEncoder.encode()`` output --
-                unbatched arrays, exactly as produced (no leading nenv
-                axis; that's added on demand when tensors are pulled
-                back out for a forward pass).
-            not_done_mask: The mask actually fed to the policy for this
-                step (``1.0 - previous step's done``). Stored, not
-                recomputed, so recompute passes during PPO update
-                reproduce identical hidden-state reset points.
-            action: The raw (pre-env-clip) sampled action.
-            log_prob: The policy's log-prob of ``action`` at collection
+            obs: This step's VecCrowdSimEnv-batched observation -- each
+                array already carries a leading [n_envs] axis.
+            not_done_mask: [n_envs] float32 -- the mask actually fed to
+                the policy for this step (1.0 - previous step's done, per
+                env). Stored, not recomputed, so recompute passes during
+                PPO update reproduce identical hidden-state reset points.
+            action: [n_envs, action_dim] raw (pre-env-clip) sampled action.
+            log_prob: [n_envs] policy's log-prob of action at collection
                 time -- PPO's ratio denominator.
-            value: The policy's value estimate at collection time.
-            reward: This step's scalar reward.
-            done: Whether the episode ended (terminated or truncated)
-                on this step.
+            value: [n_envs] policy's value estimate at collection time.
+            reward: [n_envs] this step's scalar reward, per env.
+            done: [n_envs] bool -- whether that env's episode ended
+                (terminated or truncated) on this step.
         """
         for k in _OBS_KEYS:
             self._obs[k].append(obs[k])
@@ -126,7 +125,7 @@ class RecurrentRolloutBuffer:
     # -- tensor views over stored steps --------------------------------------
 
     def observations(self) -> dict[str, Tensor]:
-        """Return every stored step's observation, stacked as ``[T, ...]``."""
+        """Return every stored step's observation, stacked as [T, n_envs, ...]."""
         return {
             k: torch.as_tensor(np.stack(v), dtype=torch.float32, device=self.device)
             for k, v in self._obs.items()
@@ -138,45 +137,52 @@ class RecurrentRolloutBuffer:
         )
 
     def old_log_probs(self) -> Tensor:
-        return torch.as_tensor(self._log_probs, dtype=torch.float32, device=self.device)
+        return torch.as_tensor(
+            np.stack(self._log_probs), dtype=torch.float32, device=self.device
+        )
 
     def old_values(self) -> Tensor:
-        return torch.as_tensor(self._values, dtype=torch.float32, device=self.device)
+        return torch.as_tensor(
+            np.stack(self._values), dtype=torch.float32, device=self.device
+        )
 
     def not_done_masks(self) -> Tensor:
         return torch.as_tensor(
-            self._not_done_masks, dtype=torch.float32, device=self.device
+            np.stack(self._not_done_masks), dtype=torch.float32, device=self.device
         )
 
     # -- GAE ------------------------------------------------------------------
 
     def compute_returns_and_advantages(
-        self, last_value: float, gamma: float, gae_lambda: float
+        self, last_value: np.ndarray, gamma: float, gae_lambda: float
     ) -> None:
-        """Compute per-step advantage/return targets via GAE(lambda).
+        """Compute per-step, per-env advantage/return targets via GAE(lambda).
 
         Must be called once, right after the rollout is fully collected.
-        The result is fixed for every PPO epoch over this rollout -- only
-        the policy's *recomputed* log-probs/values change across epochs,
-        never these targets (standard PPO: advantages are a property of
-        the data-collecting policy, not the updating one).
+        The recursion is plain numpy arithmetic over [n_envs]-shaped rows,
+        so each env's GAE accumulator resets independently at that env's
+        own episode boundaries (via that column's `dones`) without any
+        cross-env leakage -- envs are never mixed within the recursion,
+        only stacked into the same array for vectorized computation.
 
         Args:
-            last_value: Bootstrap value estimate for the state one tick
-                past the buffer's last stored step (see
-                ``ppo_trainer.CrowdNavPPTrainer.collect_rollout``).
+            last_value: [n_envs] bootstrap value estimate for the state
+                one tick past the buffer's last stored step (see
+                ppo_trainer.CrowdNavPPTrainer.collect_rollout).
             gamma: Discount factor.
             gae_lambda: GAE's bias/variance trade-off parameter.
         """
         T = len(self)
-        rewards = self._rewards
-        values = self._values + [last_value]
-        dones = self._dones
+        rewards = np.stack(self._rewards)  # [T, n_envs]
+        values = np.concatenate(
+            [np.stack(self._values), last_value[None, :]], axis=0
+        )  # [T + 1, n_envs]
+        dones = np.stack(self._dones).astype(np.float32)  # [T, n_envs]
 
-        advantages = [0.0] * T
-        gae = 0.0
+        advantages = np.zeros((T, self.n_envs), dtype=np.float32)
+        gae = np.zeros(self.n_envs, dtype=np.float32)
         for t in reversed(range(T)):
-            next_non_terminal = 1.0 - float(dones[t])
+            next_non_terminal = 1.0 - dones[t]
             delta = rewards[t] + gamma * values[t + 1] * next_non_terminal - values[t]
             gae = delta + gamma * gae_lambda * next_non_terminal * gae
             advantages[t] = gae

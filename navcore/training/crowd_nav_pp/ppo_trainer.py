@@ -1,13 +1,14 @@
 # navcore/training/crowd_nav_pp/ppo_trainer.py
-"""CrowdNavPPTrainer: PPO training loop for CrowdNavPPPolicy against CrowdSimEnv.
+"""CrowdNavPPTrainer: PPO training loop for CrowdNavPPPolicy against a
+vectorized CrowdSimEnv (VecCrowdSimEnv, n_envs parallel episodes per rollout).
 
-See rollout_buffer.py's module docstring for the Slice 1 scope decision
-(single environment, whole-trajectory recompute per PPO epoch, no
-chunked BPTT). This module owns everything else PPO needs on top of
-that: action-mode wiring (must be ActionMode.VELOCITY -- CrowdNav++
-predicts velocity directly; see CrowdSimEnv's own module docstring for
-why WAYPOINT mode wouldn't exercise the policy's collision-avoidance
-behavior at all), rollout collection, the clipped-surrogate update, and
+See rollout_buffer.py's module docstring for the Slice 2 scope (n_envs
+parallel trajectories, whole-per-env-trajectory recompute per PPO epoch, no
+chunked BPTT). This module owns everything else PPO needs on top of that:
+action-mode wiring (must be ActionMode.VELOCITY -- CrowdNav++ predicts
+velocity directly; see CrowdSimEnv's own module docstring for why WAYPOINT
+mode wouldn't exercise the policy's collision-avoidance behavior at all),
+vectorized rollout collection, the clipped-surrogate update, and
 checkpointing.
 
 Action log-prob convention:
@@ -30,9 +31,9 @@ import torch
 import os
 from torch import Tensor
 
-from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy
 from navcore.training.crowd_nav_pp.rollout_buffer import RecurrentRolloutBuffer
+from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 
 
 @dataclass(slots=True)
@@ -40,14 +41,15 @@ class PPOConfig:
     """PPO hyperparameters.
 
     Attributes:
-        n_steps: Ticks collected per rollout, before each update phase.
+        n_steps: Ticks collected per env, per rollout, before each update
+            phase (total rollout batch size is n_steps * n_envs).
         n_epochs: Full-trajectory recompute passes per rollout (see
             module docstring -- there is no time-axis minibatching here,
             only repeated whole-sequence passes).
         gamma: Discount factor.
         gae_lambda: GAE's bias/variance trade-off parameter.
         clip_range: PPO's surrogate-objective clip epsilon.
-        clip_range_vf: Optional value-function clip epsilon. ``None``
+        clip_range_vf: Optional value-function clip epsilon. None
             disables value clipping (plain MSE against returns).
         ent_coef: Entropy-bonus weight, encouraging exploration.
         vf_coef: Value-loss weight in the combined objective.
@@ -55,7 +57,8 @@ class PPOConfig:
             optimizer step.
         learning_rate: Adam learning rate.
         normalize_advantage: Whether to standardize advantages
-            (zero mean, unit std) before computing the surrogate loss.
+            (zero mean, unit std, over the whole T*n_envs batch) before
+            computing the surrogate loss.
         device: Torch device string ("cpu" or "cuda").
     """
 
@@ -64,8 +67,8 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    clip_range_vf: float | None = None
-    ent_coef: float = 0.0
+    clip_range_vf: float | None = 0.2
+    ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     learning_rate: float = 3e-4
@@ -73,30 +76,36 @@ class PPOConfig:
     device: str = "cpu"
 
 
-def _to_batch(obs: dict[str, np.ndarray], device: torch.device) -> dict[str, Tensor]:
-    """Add a leading nenv=1 axis to one step's unbatched observation dict."""
+def _to_tensor_batch(
+    obs: dict[str, np.ndarray], device: torch.device
+) -> dict[str, Tensor]:
+    """Convert one step's already n_envs-batched observation to tensors."""
     return {
-        k: torch.as_tensor(v, dtype=torch.float32, device=device).unsqueeze(0)
+        k: torch.as_tensor(v, dtype=torch.float32, device=device)
         for k, v in obs.items()
     }
 
 
 class CrowdNavPPTrainer:
-    """Drives PPO training of a ``CrowdNavPPPolicy`` against one ``CrowdSimEnv``.
+    """Drives PPO training of a CrowdNavPPPolicy against a VecCrowdSimEnv.
 
     Attributes:
-        env: The training environment. Must be configured with
-            ``ActionMode.VELOCITY`` -- see module docstring.
+        env: The vectorized training environment (n_envs parallel
+            CrowdSimEnv copies). Must be configured with
+            ActionMode.VELOCITY -- see module docstring.
+        n_envs: env.n_envs, cached for convenience.
         policy: The recurrent actor-critic being trained.
         config: PPO hyperparameters.
     """
 
     def __init__(
         self,
-        env: CrowdSimEnv,
+        env: VecCrowdSimEnv,
         policy: CrowdNavPPPolicy,
         config: PPOConfig | None = None,
     ) -> None:
+        from navcore.gym_wrapper.crowd_sim_env import ActionMode
+
         if env.config.action_mode is not ActionMode.VELOCITY:
             obs_space = env.observation_space
             expected_robot_dim = obs_space["robot"].shape[-1]
@@ -116,6 +125,7 @@ class CrowdNavPPTrainer:
                 )
 
         self.env = env
+        self.n_envs = env.n_envs
         self.policy = policy
         self.config = config or PPOConfig()
         self.device = torch.device(self.config.device)
@@ -129,11 +139,11 @@ class CrowdNavPPTrainer:
 
         self._obs: dict[str, np.ndarray] | None = None
         self._hidden_state: Tensor = self.policy.initial_hidden_state(
-            nenv=1, device=self.device
+            nenv=self.n_envs, device=self.device
         )
-        # Forces not_done_mask=0.0 (hidden-state reset) on the very
+        # Forces not_done_mask=0.0 (hidden-state reset) on every env's very
         # first tick ever collected, same as a real episode boundary.
-        self._prev_done = True
+        self._prev_done: np.ndarray = np.ones(self.n_envs, dtype=bool)
 
         self.total_steps = 0
         self.total_updates = 0
@@ -141,31 +151,32 @@ class CrowdNavPPTrainer:
     # -- rollout collection ---------------------------------------------------
 
     def collect_rollout(self) -> dict[str, float]:
-        """Collect ``config.n_steps`` ticks, then compute GAE targets.
+        """Collect config.n_steps ticks per env, then compute GAE targets.
 
         Resumes from wherever the previous rollout (or, on the first
-        call, a fresh ``env.reset()``) left off -- the recurrent hidden
-        state and in-progress episode both carry across rollout
-        boundaries; only PPO's data window resets each call.
+        call, a fresh env.reset()) left off -- the recurrent hidden
+        state and every env's in-progress episode both carry across
+        rollout boundaries; only PPO's data window resets each call.
 
         Returns:
             A small dict of collection-time diagnostics (episodes
-            completed this rollout, their mean total reward).
+            completed this rollout across all envs, their mean total
+            reward).
         """
         self.policy.eval()
         self.buffer.start(self._hidden_state)
 
         if self._obs is None:
-            self._obs, _ = self.env.reset()
+            self._obs = self.env.reset()
 
         episode_rewards: list[float] = []
-        episode_reward = 0.0
+        episode_reward = np.zeros(self.n_envs, dtype=np.float32)
 
         for _ in range(self.config.n_steps):
-            not_done_mask = 0.0 if self._prev_done else 1.0
-            obs_t = _to_batch(self._obs, self.device)
-            not_done_mask_t = torch.tensor(
-                [not_done_mask], dtype=torch.float32, device=self.device
+            not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
+            obs_t = _to_tensor_batch(self._obs, self.device)
+            not_done_mask_t = torch.as_tensor(
+                not_done_mask, dtype=torch.float32, device=self.device
             )
 
             with torch.no_grad():
@@ -180,42 +191,38 @@ class CrowdNavPPTrainer:
                     deterministic=False,
                 )
 
-            action_np = action_t.squeeze(0).cpu().numpy().astype(np.float32)
-            next_obs, reward, terminated, truncated, _info = self.env.step(action_np)
-            done = terminated or truncated
+            action_np = action_t.cpu().numpy().astype(np.float32)
+            next_obs, reward, done, _infos = self.env.step(action_np)
 
             self.buffer.add(
                 obs=self._obs,
                 not_done_mask=not_done_mask,
                 action=action_np,
-                log_prob=float(log_prob_t.item()),
-                value=float(value_t.item()),
-                reward=float(reward),
+                log_prob=log_prob_t.cpu().numpy().astype(np.float32),
+                value=value_t.squeeze(-1).cpu().numpy().astype(np.float32),
+                reward=reward.astype(np.float32),
                 done=done,
             )
 
-            episode_reward += float(reward)
-            self.total_steps += 1
+            episode_reward += reward
+            self.total_steps += self.n_envs
             self._hidden_state = new_hidden
             self._prev_done = done
 
-            if done:
-                episode_rewards.append(episode_reward)
-                episode_reward = 0.0
-                next_obs, _ = self.env.reset()
-                # self._hidden_state is intentionally left as-is here --
-                # it gets zeroed inside policy.forward via not_done_mask
-                # on the *next* tick, not eagerly here. Two-phase
-                # ordering: this loop only ever reads/writes its own
-                # local state, never reaches into the policy's internals.
+            for env_idx in np.nonzero(done)[0]:
+                episode_rewards.append(float(episode_reward[env_idx]))
+                episode_reward[env_idx] = 0.0
+                # env's own self._hidden_state reset happens via
+                # not_done_mask on the *next* tick, not eagerly here --
+                # same two-phase deferral as the single-env version.
 
             self._obs = next_obs
 
-        bootstrap_not_done_mask = 0.0 if self._prev_done else 1.0
+        bootstrap_not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
         with torch.no_grad():
-            obs_t = _to_batch(self._obs, self.device)
-            mask_t = torch.tensor(
-                [bootstrap_not_done_mask], dtype=torch.float32, device=self.device
+            obs_t = _to_tensor_batch(self._obs, self.device)
+            mask_t = torch.as_tensor(
+                bootstrap_not_done_mask, dtype=torch.float32, device=self.device
             )
             _, last_value_t, _ = self.policy.forward(
                 obs_t["robot"],
@@ -228,7 +235,7 @@ class CrowdNavPPTrainer:
             )
 
         self.buffer.compute_returns_and_advantages(
-            last_value=float(last_value_t.item()),
+            last_value=last_value_t.squeeze(-1).cpu().numpy().astype(np.float32),
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
         )
@@ -246,15 +253,16 @@ class CrowdNavPPTrainer:
         """Re-run the policy sequentially over the whole buffered rollout.
 
         Starts from the buffer's stored (detached) seed hidden state and
-        threads each step's stored ``not_done_mask`` through, so hidden-
+        threads each step's stored not_done_mask through, so hidden-
         state reset points exactly match what was seen at collection
         time -- only the network's *weights* differ between this pass
         and the original rollout. Gradients flow through every step of
         this loop; see module docstring for why this is a whole-sequence
-        pass rather than a chunked one.
+        pass rather than a chunked one. Each step's batch dimension is
+        n_envs (not 1), so every env's trajectory is recomputed together.
 
         Returns:
-            ``(log_probs, values, entropies)``, each shaped ``[T]``.
+            (log_probs, values, entropies), each shaped [T, n_envs].
         """
         obs = self.buffer.observations()
         not_done_masks = self.buffer.not_done_masks()
@@ -270,29 +278,30 @@ class CrowdNavPPTrainer:
 
         for t in range(T):
             distribution, value, hidden = self.policy.forward(
-                obs["robot"][t : t + 1],
-                obs["neighbors"][t : t + 1],
-                obs["neighbor_mask"][t : t + 1],
-                obs["neighbor_history"][t : t + 1],
-                obs["neighbor_history_mask"][t : t + 1],
+                obs["robot"][t],
+                obs["neighbors"][t],
+                obs["neighbor_mask"][t],
+                obs["neighbor_history"][t],
+                obs["neighbor_history_mask"][t],
                 hidden,
-                not_done_masks[t : t + 1],
+                not_done_masks[t],
             )
-            log_probs.append(distribution.log_prob(actions[t : t + 1]).squeeze(0))
-            values.append(value.squeeze(0).squeeze(-1))
-            entropies.append(distribution.entropy().squeeze(0))
+            log_probs.append(distribution.log_prob(actions[t]))
+            values.append(value.squeeze(-1))
+            entropies.append(distribution.entropy())
 
         return torch.stack(log_probs), torch.stack(values), torch.stack(entropies)
 
     def update(self) -> dict[str, float]:
-        """Run ``config.n_epochs`` clipped-surrogate PPO passes over the
+        """Run config.n_epochs clipped-surrogate PPO passes over the
         current buffer.
 
         Returns:
             Diagnostics averaged across epochs: policy loss, value loss,
             mean entropy, approximate KL divergence from the collecting
             policy, and the fraction of steps whose probability ratio
-            was clipped.
+            was clipped -- all averaged over every (t, env) entry in
+            the buffer, not just per-env.
         """
         self.policy.train()
 
@@ -377,7 +386,7 @@ class CrowdNavPPTrainer:
         checkpoint_every: int | None = None,
         checkpoint_dir: str | None = None,
     ) -> None:
-        """Alternate collect/update until ``total_timesteps`` ticks are collected."""
+        """Alternate collect/update until total_timesteps ticks are collected."""
         while self.total_steps < total_timesteps:
             rollout_stats = self.collect_rollout()
             update_stats = self.update()
