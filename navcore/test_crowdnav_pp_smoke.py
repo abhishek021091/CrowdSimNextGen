@@ -177,9 +177,46 @@ def _test_gradients_reach_every_submodule():
     policy = CrowdNavPPPolicy(policy_config)
     policy.train()
 
-    batch = _to_batch(obs, nenv=2)
-    hidden = policy.initial_hidden_state(nenv=2)
-    not_done = torch.ones(2)
+    nenv = 2
+    batch = _to_batch(obs, nenv=nenv)
+
+    # Force at least 2 real, non-degenerate visible neighbors per env,
+    # rather than trusting whatever the random env reset happened to
+    # produce. A single visible neighbor makes softmax attention
+    # saturate to exactly 1.0 regardless of the query/key scores, which
+    # zeroes the gradient w.r.t. every score-producing layer (the
+    # query/key projections in both attention modules) no matter how
+    # the network is wired -- not a bug, just a degenerate case this
+    # test must not depend on pedestrian spawn luck to avoid. The same
+    # applies to the temporal encoder's LSTM: if no real neighbor is
+    # visible across the history window, its cell never sees a nonzero
+    # input and its weights never get gradient either.
+    max_neighbors = batch["neighbors"].shape[1]
+    history_steps = batch["neighbor_history"].shape[1]
+    n_forced = min(2, max_neighbors)
+
+    batch["neighbors"][:, :n_forced, :] = torch.randn(
+        nenv, n_forced, batch["neighbors"].shape[-1]
+    )
+    batch["neighbor_mask"][:, :n_forced] = 1
+    batch["neighbor_mask"][:, n_forced:] = 0
+
+    batch["neighbor_history"][:, :, :n_forced, :] = torch.randn(
+        nenv, history_steps, n_forced, batch["neighbor_history"].shape[-1]
+    )
+    batch["neighbor_history_mask"][:, :, :n_forced] = 1
+    batch["neighbor_history_mask"][:, :, n_forced:] = 0
+
+    # A zeroed initial hidden state makes RecurrentNodeUpdate.gru_cell's
+    # gradient w.r.t. weight_hh identically zero for a single tick --
+    # GRUCell's gate equations multiply weight_hh by the *incoming*
+    # hidden state, so zero in means zero gradient out, independent of
+    # everything else. This is inherent to a one-step call from a fresh
+    # state, not something forcing neighbors fixes. Seed a nonzero
+    # hidden state instead, with not_done_mask=1 so RecurrentNodeUpdate
+    # doesn't reset it back to zero before the update.
+    hidden = torch.randn(nenv, policy_config.rnn_hidden_size)
+    not_done = torch.ones(nenv)
 
     distribution, value, _ = policy.forward(
         batch["robot"],
@@ -190,7 +227,14 @@ def _test_gradients_reach_every_submodule():
         hidden,
         not_done,
     )
-    loss = distribution.sample().pow(2).sum() + value.sum()
+
+    # rsample(), not sample(): torch.distributions.Normal.sample() is
+    # explicitly non-differentiable (drawn under no_grad internally), so
+    # a loss built from it carries zero gradient back through the
+    # action head regardless of correctness. rsample()'s reparameterized
+    # draw (mean + std * noise, noise detached) is what actually needs
+    # to be checked here.
+    loss = distribution.rsample().pow(2).sum() + value.sum()
     loss.backward()
 
     dead = [

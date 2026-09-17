@@ -44,7 +44,23 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint-every", type=int, default=200)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument(
+        "--use-gst-prediction",
+        action="store_true",
+        help="Feed a pretrained GST predictor's future-displacement features "
+        "into the policy. Requires --gst-checkpoint.",
+    )
+    parser.add_argument(
+        "--gst-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a GST predictor checkpoint saved by "
+        "GSTPredictorTrainer.save() / train_gst_predictor.py.",
+    )
     args = parser.parse_args()
+
+    if args.use_gst_prediction and not args.gst_checkpoint:
+        parser.error("--use-gst-prediction requires --gst-checkpoint")
 
     env_config = CrowdSimEnvConfig(
         action_mode=ActionMode.VELOCITY,
@@ -54,10 +70,19 @@ def main() -> None:
     )
     env = CrowdSimEnv(GoalReachingTask(), env_config)
 
+    gst_predictor = None
+    if args.use_gst_prediction:
+        gst_predictor = GSTPredictorTrainer.load_predictor(
+            args.gst_checkpoint, device=args.device
+        )
+
     # Defaults already match ObservationEncoder's actual feature widths
     # (robot_feature_dim=8, neighbor_feature_dim=5) -- see policy.py's
     # _NEIGHBOR_MOTION_SLICE comment for the same real coupling point.
-    policy = CrowdNavPPPolicy(CrowdNavPPPolicyConfig())
+    policy = CrowdNavPPPolicy(
+        CrowdNavPPPolicyConfig(use_gst_prediction=args.use_gst_prediction),
+        gst_predictor=gst_predictor,
+    )
 
     ppo_config = PPOConfig(
         n_steps=args.n_steps,
@@ -80,20 +105,6 @@ def main() -> None:
         total_timesteps=args.total_timesteps,
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
-    )
-
-    if args.use_gst_prediction and not args.gst_checkpoint:
-        parser.error("--use-gst-prediction requires --gst-checkpoint")
-
-    gst_predictor = None
-    if args.use_gst_prediction:
-        gst_predictor = GSTPredictorTrainer.load_predictor(
-            args.gst_checkpoint, device=args.device
-        )
-
-    policy = CrowdNavPPPolicy(
-        CrowdNavPPPolicyConfig(use_gst_prediction=args.use_gst_prediction),
-        gst_predictor=gst_predictor,
     )
 
 
