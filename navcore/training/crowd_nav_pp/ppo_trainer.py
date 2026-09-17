@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import os
 from torch import Tensor
 
 from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv
@@ -97,14 +98,22 @@ class CrowdNavPPTrainer:
         config: PPOConfig | None = None,
     ) -> None:
         if env.config.action_mode is not ActionMode.VELOCITY:
-            raise ValueError(
-                "CrowdNavPPTrainer requires CrowdSimEnvConfig.action_mode="
-                "ActionMode.VELOCITY -- CrowdNav++ is meant to learn "
-                "collision avoidance directly (see CrowdSimEnv's module "
-                "docstring). WAYPOINT mode routes the robot through ORCA "
-                "instead and would never exercise this policy's own "
-                "avoidance behavior."
-            )
+            obs_space = env.observation_space
+            expected_robot_dim = obs_space["robot"].shape[-1]
+            expected_neighbor_dim = obs_space["neighbors"].shape[-1]
+            if policy.config.robot_feature_dim != expected_robot_dim:
+                raise ValueError(
+                    f"policy.config.robot_feature_dim={policy.config.robot_feature_dim} "
+                    f"does not match env's robot observation width "
+                    f"{expected_robot_dim} -- ObservationEncoder and "
+                    f"CrowdNavPPPolicyConfig have drifted apart."
+                )
+            if policy.config.neighbor_feature_dim != expected_neighbor_dim:
+                raise ValueError(
+                    f"policy.config.neighbor_feature_dim="
+                    f"{policy.config.neighbor_feature_dim} does not match env's "
+                    f"neighbor observation width {expected_neighbor_dim}."
+                )
 
         self.env = env
         self.policy = policy
@@ -395,6 +404,7 @@ class CrowdNavPPTrainer:
                 )
 
     def save_checkpoint(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         torch.save(
             {
                 "policy_state_dict": self.policy.state_dict(),

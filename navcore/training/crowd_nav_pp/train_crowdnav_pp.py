@@ -16,6 +16,7 @@ from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimE
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.crowd_nav_pp.ppo_trainer import CrowdNavPPTrainer, PPOConfig
+from navcore.training.gst_predictor.gst_predictor_trainer import GSTPredictorTrainer
 
 
 def main() -> None:
@@ -36,7 +37,11 @@ def main() -> None:
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--checkpoint-dir", type=str, default="./navcore/training/crowd_nav_pp/checkpoints")
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="./navcore/training/crowd_nav_pp/checkpoints",
+    )
     parser.add_argument("--checkpoint-every", type=int, default=200)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
@@ -75,6 +80,20 @@ def main() -> None:
         total_timesteps=args.total_timesteps,
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
+    )
+
+    if args.use_gst_prediction and not args.gst_checkpoint:
+        parser.error("--use-gst-prediction requires --gst-checkpoint")
+
+    gst_predictor = None
+    if args.use_gst_prediction:
+        gst_predictor = GSTPredictorTrainer.load_predictor(
+            args.gst_checkpoint, device=args.device
+        )
+
+    policy = CrowdNavPPPolicy(
+        CrowdNavPPPolicyConfig(use_gst_prediction=args.use_gst_prediction),
+        gst_predictor=gst_predictor,
     )
 
 
