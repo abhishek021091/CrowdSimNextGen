@@ -24,7 +24,7 @@ from navcore.step.step import Step
 from navcore.visualization.visualizer import Visualizer
 
 CHECKPOINT_PATH = (
-    "./navcore/training/crowd_nav_pp/checkpoints/run1/crowdnav_pp_step179200.pt"
+    "./navcore/training/crowd_nav_pp/checkpoints/run3/crowdnav_pp_step4915200.pt"
 )
 
 
@@ -118,6 +118,19 @@ class CrowdNavPPLiveDemo:
         self.encoder.reset()
         self.hidden_state = self.policy.initial_hidden_state(nenv=1)
 
+    def _respawn_pedestrians(self, result) -> None:
+        """Rebuild any pedestrian that reached its goal this tick, so the
+        crowd stays dynamic for the whole episode instead of progressively
+        freezing in place. Same pattern as test_sweep.py/GlobalPlanner.
+        """
+        for ped_id, reached in result.pedestrian_reached_goals.items():
+            if reached:
+                self.env = self.env_builder.rebuild_pedestrian(
+                    env=self.env,
+                    ped_id=ped_id,
+                    random_seed=self.env.info.random_seed + self.tick_count + ped_id,
+                )
+
     def run(self, max_ticks: int | None = None) -> None:
         print(
             f"Running live CrowdNav++ demo with checkpoint from "
@@ -127,6 +140,7 @@ class CrowdNavPPLiveDemo:
             self.tick_count += 1
             velocity = self._select_robot_velocity()
             result = self.step_driver.step(robot_velocity_override=velocity)
+            self._respawn_pedestrians(result)
             self.visualizer.refresh(self.env)
 
             if result.robot_reached_goal or self.env.did_collision_happened():

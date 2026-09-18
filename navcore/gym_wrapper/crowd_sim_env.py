@@ -168,6 +168,7 @@ class CrowdSimEnv(gym.Env):
         step_result = self._step_driver.step(
             robot_velocity_override=self._velocity_override
         )
+        self._respawn_pedestrians(step_result)
         collided = self.env.did_collision_happened()
 
         observation = self._obs_encoder.encode(self.env)
@@ -212,3 +213,36 @@ class CrowdSimEnv(gym.Env):
         half_width = float(arena["width"]) / 2.0
         half_height = float(arena["height"]) / 2.0
         return Vector2(float(action[0]) * half_width, float(action[1]) * half_height)
+
+    def _robot_at_goal(self) -> bool:
+        """Whether the robot's current (post-move) pose is within the
+        configured goal-reach tolerance.
+
+        Computed independently here, rather than reused from Step's
+        StepResult.robot_reached_goal, because Step's flag is checked
+        *before* this tick's movement is integrated (correct for its
+        other callers, which loop until it becomes true) -- using it
+        here would report the wrong tick's position relative to
+        `terminated`, which is decided from the post-move pose.
+        """
+        robot = self.env.robot
+        assert robot.pose is not None and robot.goal is not None
+        distance = math.hypot(
+            robot.goal.gx - robot.pose.px, robot.goal.gy - robot.pose.py
+        )
+        return distance <= self.env.info.goal_reach_tolerance
+
+    def _respawn_pedestrians(self, step_result) -> None:
+        """Rebuild any pedestrian that reached its goal this tick with a
+        fresh pose/goal, so the crowd stays dynamic for the full episode
+        instead of progressively freezing in place. Mirrors the same
+        pattern test_sweep.py/GlobalPlanner already use for the coverage
+        pipeline (see EnvironmentBuilder.rebuild_pedestrian).
+        """
+        for ped_id, reached in step_result.pedestrian_reached_goals.items():
+            if reached:
+                self.env = self._env_builder.rebuild_pedestrian(
+                    env=self.env,
+                    ped_id=ped_id,
+                    random_seed=self.env.info.random_seed + self._elapsed_steps + ped_id,
+                )

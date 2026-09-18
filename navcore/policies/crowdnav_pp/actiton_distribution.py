@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from networkx import config
 import torch
 from torch import Tensor, nn
 from torch.distributions import Independent, Normal
@@ -67,7 +68,8 @@ class DiagGaussianHead(nn.Module):
         super().__init__()
         self.config = config
         self.mean_linear = nn.Linear(config.input_dim, config.action_dim)
-        self.log_std = nn.Parameter(torch.zeros(config.action_dim))
+        # was: self.log_std = nn.Parameter(torch.zeros(config.action_dim))
+        self.log_std = nn.Parameter(torch.full((config.action_dim,), -1.0))
 
     def forward(self, actor_features: Tensor) -> Independent:
         """Return the action distribution for this tick.

@@ -24,11 +24,11 @@ Action log-prob convention:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
 import torch
-import os
 from torch import Tensor
 
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy
