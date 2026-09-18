@@ -220,3 +220,4 @@ __marimo__/
 #Python RVO
 Python-RVO2/
 ./navcore/training/crowd_nav_pp/checkpoints/
+*.pt

@@ -23,6 +23,7 @@ class EnvironmentInfo:
     random_seed: int = env_config["random"]["seed"]
     collision_counter: int = 0
     goal_reach_tolerance: float = env_config["tolerance"]["goal_reach"]
+    safety_distance: float = env_config["safety"]["distance"]
 
 
 @dataclass

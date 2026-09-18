@@ -41,9 +41,11 @@ class Pedestrian(Agent):
         self.sensor = RangeSensor(self)
         self.group_id: int | None = None
 
-        if self.config["Randomization"]["randomize_pedestrian_radius"]:
+        if (
+            self.config["Randomization"]["randomize_pedestrian_radius"]
+            and self.config["Randomization"]["randomize_pedestrian_v_pref"]
+        ):
             self.radius *= self.rand.uniform(0.8, 1.2)
-        if self.config["Randomization"]["randomize_pedestrian_v_pref"]:
             self.v_pref *= self.rand.uniform(0.8, 1.2)
         else:
             self.radius = self.config["physical"]["radius"]

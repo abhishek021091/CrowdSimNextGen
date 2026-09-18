@@ -390,6 +390,7 @@ class CrowdNavPPTrainer:
         while self.total_steps < total_timesteps:
             rollout_stats = self.collect_rollout()
             update_stats = self.update()
+            self.metrics_logger.log(self.total_steps, {**rollout_stats, **update_stats})
 
             if self.total_updates % log_every == 0:
                 print(

@@ -31,7 +31,9 @@ class CollisionChecker:
             distance = np.linalg.norm(
                 [agent_pose.px - ped_pose.px, agent_pose.py - ped_pose.py]
             )
-            if distance < (self.agent.radius + ped.radius):
+            if distance < (
+                self.agent.radius + ped.radius + self.env.info.safety_distance
+            ):
                 return True
         for obstacle in self.env.obstacles.values():
             obstacle_pose = obstacle.geometry.center
@@ -40,7 +42,11 @@ class CollisionChecker:
                 distance = np.linalg.norm(
                     [agent_pose.px - obstacle_pose.x, agent_pose.py - obstacle_pose.y]
                 )
-                if distance < (self.agent.radius + obstacle.geometry.radius):
+                if distance < (
+                    self.agent.radius
+                    + obstacle.geometry.radius
+                    + self.env.info.safety_distance
+                ):
                     return True
             elif isinstance(obstacle.geometry, Rectangle):
                 # Check if the agent is within the rectangle bounds

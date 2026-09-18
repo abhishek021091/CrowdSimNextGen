@@ -37,27 +37,27 @@ class Rectangle(Geometry):
         """
 
         if (
-            self.env_config["arenaSize"]["width"] <= self.center[0] / 2
-            or -self.env_config["arenaSize"]["width"] >= self.center[0] / 2
+            self.env_config["arenaSize"]["width"] / 2 <= self.center[0]
+            or -self.env_config["arenaSize"]["width"] / 2 >= self.center[0]
         ):
             raise ValueError(
                 f"Rectangle center x-coordinate is out of bounds, got {self.center[0]}."
             )
         if (
-            self.env_config["arenaSize"]["height"] <= self.center[1] / 2
-            or -self.env_config["arenaSize"]["height"] >= self.center[1] / 2
+            self.env_config["arenaSize"]["height"] / 2 <= self.center[1]
+            or -self.env_config["arenaSize"]["height"] / 2 >= self.center[1]
         ):
             raise ValueError(
                 f"Rectangle center y-coordinate is out of bounds, got {self.center[1]}."
             )
         if (
-            self.env_config["arenaSize"]["width"] <= self.width / 2.0
-            or -self.env_config["arenaSize"]["width"] >= self.width / 2.0
+            self.env_config["arenaSize"]["width"] / 2 <= self.width
+            or -self.env_config["arenaSize"]["width"] / 2 >= self.width
         ):
             raise ValueError(f"Rectangle width is out of bounds, got {self.width!r}.")
         if (
-            self.env_config["arenaSize"]["height"] <= self.height / 2.0
-            or -self.env_config["arenaSize"]["height"] >= self.height / 2.0
+            self.env_config["arenaSize"]["height"] / 2 <= self.height
+            or -self.env_config["arenaSize"]["height"] / 2 >= self.height
         ):
             raise ValueError(f"Rectangle height is out of bounds, got {self.height!r}.")
 
