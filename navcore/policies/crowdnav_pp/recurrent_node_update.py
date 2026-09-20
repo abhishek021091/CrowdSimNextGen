@@ -136,6 +136,7 @@ class RecurrentNodeUpdate(nn.Module):
         self,
         robot_embedding: Tensor,
         crowd_context: Tensor,
+        obstacle_context: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
@@ -177,6 +178,11 @@ class RecurrentNodeUpdate(nn.Module):
                 f"crowd_context shape {tuple(crowd_context.shape)} does not "
                 f"match expected {(nenv, self.config.input_dim)}."
             )
+        if tuple(obstacle_context.shape) != (nenv, self.config.input_dim):
+            raise ValueError(
+                f"obstacle_context shape {tuple(obstacle_context.shape)} does not "
+                f"match expected {(nenv, self.config.input_dim)}."
+            )
         if tuple(hidden_state.shape) != (nenv, self.config.rnn_hidden_size):
             raise ValueError(
                 f"hidden_state shape {tuple(hidden_state.shape)} does not "
@@ -190,7 +196,8 @@ class RecurrentNodeUpdate(nn.Module):
 
         robot_branch = self.robot_embed(robot_embedding)
         context_branch = self.context_embed(crowd_context)
-        concat = torch.cat((robot_branch, context_branch), dim=-1)
+        obstacle_branch = self.context_embed(obstacle_context)
+        concat = torch.cat((robot_branch, context_branch, obstacle_branch), dim=-1)
 
         reset_hidden = hidden_state * not_done_mask.unsqueeze(-1)
         new_hidden = self.gru_cell(concat, reset_hidden)

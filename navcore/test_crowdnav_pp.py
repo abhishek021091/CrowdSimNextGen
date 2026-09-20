@@ -72,7 +72,7 @@ class CrowdNavPPLiveDemo:
         # policy has never seen a static obstacle; evaluating it in an
         # arena full of tables would be a distribution-shift artifact,
         # not a measurement of what it actually learned.
-        self.env_builder = EnvironmentBuilder(include_static_obstacles=False)
+        self.env_builder = EnvironmentBuilder(include_static_obstacles=True)
         self.env = self.env_builder.build_environment()
         self.step_driver = self._build_step_driver()
 
