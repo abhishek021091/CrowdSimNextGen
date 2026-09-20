@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch import Tensor
 
+from navcore.analysis.metrics_logger import TrainingMetricsLogger
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy
 from navcore.training.crowd_nav_pp.rollout_buffer import RecurrentRolloutBuffer
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
@@ -103,6 +105,7 @@ class CrowdNavPPTrainer:
         env: VecCrowdSimEnv,
         policy: CrowdNavPPPolicy,
         config: PPOConfig | None = None,
+        metrics_path: str | Path | None = None,
     ) -> None:
         from navcore.gym_wrapper.crowd_sim_env import ActionMode
 
@@ -137,6 +140,13 @@ class CrowdNavPPTrainer:
 
         self.buffer = RecurrentRolloutBuffer(device=self.device)
 
+        # Dependency-free JSONL logger -- training loop stays headless.
+        # Plot offline via navcore.analysis.training_curves.TrainingCurvePlotter.
+        self.metrics_logger = (
+            TrainingMetricsLogger(Path(metrics_path))
+            if metrics_path is not None
+            else None
+        )
         self._obs: dict[str, np.ndarray] | None = None
         self._hidden_state: Tensor = self.policy.initial_hidden_state(
             nenv=self.n_envs, device=self.device
@@ -390,7 +400,10 @@ class CrowdNavPPTrainer:
         while self.total_steps < total_timesteps:
             rollout_stats = self.collect_rollout()
             update_stats = self.update()
-            self.metrics_logger.log(self.total_steps, {**rollout_stats, **update_stats})
+            if self.metrics_logger is not None:
+                self.metrics_logger.log(
+                    self.total_steps, {**rollout_stats, **update_stats}
+                )
 
             if self.total_updates % log_every == 0:
                 print(

@@ -36,11 +36,13 @@ class GoalReachingTask:
     def __init__(
         self,
         collision_penalty: float = -25.0,
+        out_bound_penalty: float = -25.0,
         goal_bonus: float = 50.0,
         step_penalty: float = -0.01,
         progress_weight: float = 2.0,
     ) -> None:
         self.collision_penalty = collision_penalty
+        self.out_bound_penalty = out_bound_penalty
         self.goal_bonus = goal_bonus
         self.step_penalty = step_penalty
         self.progress_weight = progress_weight
@@ -56,7 +58,7 @@ class GoalReachingTask:
         self._mission = GoalReachingMission()
         self._prev_distance = self._distance_to_goal(env)
 
-    def reward(self, env: Environment, collided: bool) -> float:
+    def reward(self, env: Environment, collided: bool, out_of_bounds: bool) -> float:
         distance = self._distance_to_goal(env)
         assert self._prev_distance is not None, "reward() called before reset()."
         progress = self._prev_distance - distance
@@ -65,12 +67,16 @@ class GoalReachingTask:
         reward = self.step_penalty + self.progress_weight * progress
         if collided:
             reward += self.collision_penalty
+        if out_of_bounds:
+            reward += self.out_bound_penalty
         if self._reached_goal(env):
             reward += self.goal_bonus
         return reward
 
-    def is_terminated(self, env: Environment, collided: bool) -> bool:
-        return self._reached_goal(env) or collided
+    def is_terminated(
+        self, env: Environment, collided: bool, out_of_bounds: bool
+    ) -> bool:
+        return self._reached_goal(env) or collided or out_of_bounds
 
     def _reached_goal(self, env: Environment) -> bool:
         return self._distance_to_goal(env) <= env.info.goal_reach_tolerance

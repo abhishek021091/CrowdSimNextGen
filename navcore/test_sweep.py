@@ -50,7 +50,11 @@ class SweepTest:
             ),
         )
 
-        self._planner = DecentralizedORCAPlanner(
+        self._robot_planner = DecentralizedORCAPlanner(
+            config_file="orca.toml",
+            obstacles=self.env.obstacles,
+        )
+        self._crowd_planner = DecentralizedORCAPlanner(
             config_file="orca.toml",
             # obstacles=self.env.obstacles,
         )
@@ -58,7 +62,8 @@ class SweepTest:
         self._step = Step(
             env=self.env,
             robot_visible=False,
-            planner=self._planner,
+            robot_planner=self._robot_planner,
+            crowd_planner=self._crowd_planner,
             rand=self.env_builder.rand,
         )
 

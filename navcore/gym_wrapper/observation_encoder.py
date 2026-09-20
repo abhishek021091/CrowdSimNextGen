@@ -23,10 +23,11 @@ Design choices:
 
 from __future__ import annotations
 
-from collections import deque
 import math
+from collections import deque
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium import spaces
 
 from navcore.entities.components.state import ObservableState
@@ -92,7 +93,7 @@ class ObservationEncoder:
             }
         )
 
-    def encode(self, env: Environment) -> dict[str, np.ndarray]:
+    def encode(self, env: Environment) -> dict[str, npt.NDArray[np.float32]]:
         robot = env.robot
         if robot.pose is None or robot.velocity is None or robot.goal is None:
             raise RuntimeError(
@@ -107,7 +108,7 @@ class ObservationEncoder:
         # for interface compliance with RangeSensor.observe's signature.
         neighbor_obs = robot.sensor.observe(env, robot_visible=False)
 
-        robot_features = np.array(
+        robot_features: npt.NDArray[np.float32] = np.array(
             [
                 robot.goal.gx - robot.pose.px,
                 robot.goal.gy - robot.pose.py,
@@ -138,7 +139,12 @@ class ObservationEncoder:
         robot_x: float,
         robot_y: float,
         observation: dict[int, ObservableState],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+    ]:
         def distance(obs: ObservableState) -> float:
             return math.hypot(obs.pose.px - robot_x, obs.pose.py - robot_y)
 
@@ -152,9 +158,9 @@ class ObservationEncoder:
             )
             track.append(features)
 
-        nearest = sorted(
-            observation.items(), key=lambda item: distance(item[1])
-        )[: self.max_neighbors]
+        nearest = sorted(observation.items(), key=lambda item: distance(item[1]))[
+            : self.max_neighbors
+        ]
 
         neighbors = np.zeros((self.max_neighbors, _NEIGHBOR_FEATURES), dtype=np.float32)
         mask = np.zeros(self.max_neighbors, dtype=np.int8)

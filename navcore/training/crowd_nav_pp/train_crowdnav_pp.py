@@ -50,6 +50,7 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--use-gst-prediction", action="store_true", default=False)
     parser.add_argument("--gst-checkpoint", type=str, default=None)
+    parser.add_argument("--metrics-path", type=str, default=None)
     args = parser.parse_args()
 
     if args.use_gst_prediction and not args.gst_checkpoint:
@@ -99,7 +100,7 @@ def main() -> None:
         device=args.device,
     )
 
-    trainer = CrowdNavPPTrainer(env, policy, ppo_config)
+    trainer = CrowdNavPPTrainer(env, policy, ppo_config, metrics_path=args.metrics_path)
     if args.resume:
         trainer.load_checkpoint(args.resume)
 

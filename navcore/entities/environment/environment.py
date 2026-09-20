@@ -56,3 +56,18 @@ class Environment:
         if collision_happened:
             self.info.collision_counter += 1
         return collision_happened
+
+    def out_of_bounds(self) -> bool:
+        """Check if the robot is out of bounds."""
+        w = float(self.info.arena_width) / 2
+        h = float(self.info.arena_height) / 2
+        robot_pose = self.robot.pose
+        if robot_pose is None:
+            raise RuntimeError("Robot pose has not been initialized.")
+        is_out_of_bounds = (
+            robot_pose.px < -w
+            or robot_pose.px > w
+            or robot_pose.py < -h
+            or robot_pose.py > h
+        )
+        return is_out_of_bounds

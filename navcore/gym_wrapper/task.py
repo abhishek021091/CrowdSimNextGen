@@ -40,17 +40,21 @@ class Task(Protocol):
         """
         ...
 
-    def reward(self, env: Environment, collided: bool) -> float:
+    def reward(self, env: Environment, collided: bool, out_of_bounds: bool) -> float:
         """Return this tick's scalar reward.
 
         Args:
             env: The environment after this tick's integration.
             collided: Whether Environment.did_collision_happened()
                 flagged a collision on this tick.
+            out_of_bounds: Whether Environment.out_of_bounds()
+                flagged that the robot is out of bounds on this tick.
         """
         ...
 
-    def is_terminated(self, env: Environment, collided: bool) -> bool:
+    def is_terminated(
+        self, env: Environment, collided: bool, out_of_bounds: bool
+    ) -> bool:
         """Return whether the episode ended due to task success/failure.
 
         Does not cover truncation (step-limit timeouts) -- that's

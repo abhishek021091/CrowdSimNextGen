@@ -74,11 +74,11 @@ class CrowdSimEnvConfig:
     history_steps: int = 8
     max_episode_steps: int = 500
     robot_visible: bool = False
-    include_static_obstacles: bool = False
+    include_static_obstacles: bool = True
     orca_config_file: str = "orca.toml"
 
 
-class CrowdSimEnv(gym.Env):
+class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
     """Gymnasium environment wrapping navcore's crowd simulation.
 
     Rendering is deliberately out of scope here -- construct one of
@@ -88,7 +88,7 @@ class CrowdSimEnv(gym.Env):
     stays task-agnostic.
     """
 
-    metadata: dict[str, Any] = {"render_modes": []}
+    metadata: dict[str, Any] = {"render_modes": []}  # noqa: RUF012
 
     def __init__(self, task: Task, config: CrowdSimEnvConfig | None = None) -> None:
         super().__init__()
@@ -115,6 +115,7 @@ class CrowdSimEnv(gym.Env):
     def _build_action_space(self) -> gym.Space:
         if self.config.action_mode is ActionMode.VELOCITY:
             v_max = float(Robot.config["kinematics"]["v_pref"])
+
             return spaces.Box(low=-v_max, high=v_max, shape=(2,), dtype=np.float32)
 
         # WAYPOINT: normalized [-1, 1] per axis, scaled to arena
@@ -143,14 +144,20 @@ class CrowdSimEnv(gym.Env):
             )
             robot_mission = self._waypoint_mission
 
-        planner = DecentralizedORCAPlanner(
+        robot_planner = None
+        if self.config.action_mode is ActionMode.WAYPOINT:
+            robot_planner = DecentralizedORCAPlanner(
+                config_file=self.config.orca_config_file,
+                obstacles=self.env.obstacles,
+            )
+        crowd_planner = DecentralizedORCAPlanner(
             config_file=self.config.orca_config_file,
-            # obstacles=self.env.obstacles,
         )
         self._step_driver = Step(
-            planner=planner,
+            crowd_planner=crowd_planner,
             env=self.env,
             robot_visible=self.config.robot_visible,
+            robot_planner=robot_planner,
             robot_mission=robot_mission,
         )
         self._velocity_override = None
@@ -170,10 +177,11 @@ class CrowdSimEnv(gym.Env):
         )
         self._respawn_pedestrians(step_result)
         collided = self.env.did_collision_happened()
+        out_of_bounds = self.env.out_of_bounds()
 
         observation = self._obs_encoder.encode(self.env)
-        reward = self.task.reward(self.env, collided)
-        terminated = self.task.is_terminated(self.env, collided)
+        reward = self.task.reward(self.env, collided, out_of_bounds)
+        terminated = self.task.is_terminated(self.env, collided, out_of_bounds)
 
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.config.max_episode_steps
@@ -244,5 +252,5 @@ class CrowdSimEnv(gym.Env):
                 self.env = self._env_builder.rebuild_pedestrian(
                     env=self.env,
                     ped_id=ped_id,
-                    random_seed=self.env.info.random_seed + self._elapsed_steps + ped_id,
+                    random_seed=self.env.info.random_seed + self._elapsed_steps,
                 )

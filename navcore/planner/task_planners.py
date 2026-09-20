@@ -1,4 +1,5 @@
 """Small orchestrators for non-coverage navigation tasks."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -32,7 +33,15 @@ class GoalPlanner:
     def __init__(self) -> None:
         self.builder = EnvironmentBuilder()
         self.env = self.builder.build_environment()
-        self.step_driver = Step(DecentralizedORCAPlanner("orca.toml", self.env.obstacles), self.env, False, robot_mission=GoalReachingMission())
+        robot_planner = DecentralizedORCAPlanner("orca.toml", self.env.obstacles)
+        crowd_planner = DecentralizedORCAPlanner("orca.toml")
+        self.step_driver = Step(
+            robot_planner,
+            crowd_planner,
+            self.env,
+            False,
+            robot_mission=GoalReachingMission(),
+        )
 
     def run(self, max_steps: int = 500) -> MissionMetrics:
         metrics = MissionMetrics()
@@ -42,10 +51,21 @@ class GoalPlanner:
             result = self.step_driver.step()
             metrics.steps += 1
             if previous_position is not None and self.env.robot.pose is not None:
-                metrics.path_length += math.hypot(self.env.robot.pose.px - previous_position[0], self.env.robot.pose.py - previous_position[1])
+                metrics.path_length += math.hypot(
+                    self.env.robot.pose.px - previous_position[0],
+                    self.env.robot.pose.py - previous_position[1],
+                )
             for ped in self.env.crowd.values():
                 if self.env.robot.pose is not None and ped.pose is not None:
-                    metrics.min_separation = min(metrics.min_separation, math.hypot(self.env.robot.pose.px-ped.pose.px, self.env.robot.pose.py-ped.pose.py) - self.env.robot.radius - ped.radius)
+                    metrics.min_separation = min(
+                        metrics.min_separation,
+                        math.hypot(
+                            self.env.robot.pose.px - ped.pose.px,
+                            self.env.robot.pose.py - ped.pose.py,
+                        )
+                        - self.env.robot.radius
+                        - ped.radius,
+                    )
             metrics.collision = self.env.did_collision_happened()
             metrics.success = result.robot_reached_goal
             if metrics.success or metrics.collision:
@@ -66,14 +86,18 @@ class WaypointPlanner(GoalPlanner):
 
 class RLPlanner:
     """Gym lifecycle entry point; an external policy supplies actions."""
+
     def __init__(self) -> None:
         from navcore.gym_wrapper.crowd_sim_env import CrowdSimEnv
         from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
+
         self.env = CrowdSimEnv(GoalReachingTask())
 
     def run(self, policy, max_steps: int = 500) -> None:
         observation, _ = self.env.reset()
         for _ in range(max_steps):
-            observation, _, terminated, truncated, _ = self.env.step(policy(observation))
+            observation, _, terminated, truncated, _ = self.env.step(
+                policy(observation)
+            )
             if terminated or truncated:
                 return

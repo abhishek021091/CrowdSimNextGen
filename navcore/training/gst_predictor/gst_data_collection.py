@@ -70,8 +70,16 @@ class GSTDataCollector:
             include_static_obstacles=False,
         )
         env = builder.build_environment()
-        planner = DecentralizedORCAPlanner(config_file=self.orca_config_file)
-        step_driver = Step(planner=planner, env=env, robot_visible=False)
+        robot_planner = DecentralizedORCAPlanner(
+            config_file=self.orca_config_file, obstacles=env.obstacles
+        )
+        crowd_planner = DecentralizedORCAPlanner(config_file=self.orca_config_file)
+        step_driver = Step(
+            robot_planner=robot_planner,
+            crowd_planner=crowd_planner,
+            env=env,
+            robot_visible=False,
+        )
         return env, step_driver
 
     def collect(self, n_episodes: int, ticks_per_episode: int = 200) -> list[GSTSample]:

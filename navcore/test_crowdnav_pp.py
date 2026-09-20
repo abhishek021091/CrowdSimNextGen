@@ -24,7 +24,7 @@ from navcore.step.step import Step
 from navcore.visualization.visualizer import Visualizer
 
 CHECKPOINT_PATH = (
-    "./navcore/training/crowd_nav_pp/checkpoints/run3/crowdnav_pp_step4915200.pt"
+    "./navcore/training/crowd_nav_pp/checkpoints/run3/crowdnav_pp_step6881280.pt"
 )
 
 
@@ -82,8 +82,12 @@ class CrowdNavPPLiveDemo:
         self.tick_count = 0
 
     def _build_step_driver(self) -> Step:
-        planner = DecentralizedORCAPlanner(config_file="orca.toml")
-        return Step(planner=planner, env=self.env, robot_visible=False)
+        crowd_planner = DecentralizedORCAPlanner(config_file="orca.toml")
+        return Step(
+            crowd_planner=crowd_planner,
+            env=self.env,
+            robot_visible=False,
+        )
 
     def _select_robot_velocity(self):
         obs = self.encoder.encode(self.env)

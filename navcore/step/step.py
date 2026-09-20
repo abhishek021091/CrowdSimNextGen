@@ -79,9 +79,10 @@ class Step:
 
     def __init__(
         self,
-        planner: VelocityPlanner,
         env: Environment,
         robot_visible: bool,
+        robot_planner: VelocityPlanner | None = None,
+        crowd_planner: VelocityPlanner | None = None,
         robot_mission: Mission | None = None,
         crowd_missions: dict[int, Mission] | None = None,
         rand: np.random.Generator | None = None,
@@ -89,7 +90,8 @@ class Step:
         self.env = env
         self.robot = env.robot
         self.crowd = env.crowd
-        self.planner = planner
+        self.robot_planner: VelocityPlanner | None = robot_planner
+        self.crowd_planner: VelocityPlanner | None = crowd_planner
         self.robot_visible = robot_visible
         self.robot_mission = robot_mission
         self._group_missions: dict[int, GroupGoalReachingMission] = {}
@@ -177,6 +179,13 @@ class Step:
     ) -> Velocity:
         if robot_velocity_override is not None:
             return robot_velocity_override
+        if self.robot_planner is None:
+            raise RuntimeError(
+                "Step has no robot_planner and no robot_velocity_override "
+                "was given this tick -- construct Step with a robot_planner "
+                "(ORCA-driven robot) or pass robot_velocity_override every "
+                "step() call (externally driven robot, e.g. an RL policy)."
+            )
         assert self.env.robot.sensor is not None
         robot_obs = self.get_observations(self.env.robot)
 
@@ -185,7 +194,7 @@ class Step:
         )
         robot_full_state = self._full_state_for(self.env.robot, target)
 
-        robot_velocity, _ = self.planner.compute_velocities(
+        robot_velocity, _ = self.robot_planner.compute_velocities(
             self.ROBOT_KEY, robot_full_state, robot_obs
         )
         return robot_velocity
@@ -204,8 +213,14 @@ class Step:
             mission = self.crowd_missions.get(ped_id)
             target = self._target_for(ped, mission, list(ped_obs.values()))
             ped_full_state = self._full_state_for(ped, target)
-
-            ped_velocity, _ = self.planner.compute_velocities(
+            if self.crowd_planner is None:
+                raise RuntimeError(
+                    "Step has no crowd_planner -- construct Step with a "
+                    "crowd_planner (ORCA-driven pedestrians) or pass "
+                    "pedestrian velocities every step() call (externally "
+                    "driven pedestrians, e.g. an RL policy)."
+                )
+            ped_velocity, _ = self.crowd_planner.compute_velocities(
                 ped_id, ped_full_state, ped_obs
             )
             crowd_velocities[ped_id] = ped_velocity

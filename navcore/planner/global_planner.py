@@ -210,11 +210,16 @@ class GlobalPlanner:
         if step_driver is not None:
             self.step_driver = step_driver
         else:
-            planner = DecentralizedORCAPlanner(
-                config_file=orca_config_file  # , obstacles=self.env.obstacles
+            robot_planner = DecentralizedORCAPlanner(
+                config_file=orca_config_file, obstacles=self.env.obstacles
             )
+            crowd_planner = DecentralizedORCAPlanner(config_file=orca_config_file)
             self.step_driver = Step(
-                planner=planner, env=self.env, robot_visible=False, rand=self.rand
+                robot_planner=robot_planner,
+                crowd_planner=crowd_planner,
+                env=self.env,
+                robot_visible=False,
+                rand=self.rand,
             )
 
         self.visualizer = visualizer if visualizer is not None else Visualizer()
