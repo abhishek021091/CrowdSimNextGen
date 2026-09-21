@@ -212,6 +212,7 @@ class CrowdNavPPPolicy(nn.Module):
         self,
         config: CrowdNavPPPolicyConfig,
         gst_predictor: GSTPredictor | None = None,
+        obstacle_encoder: ObstacleEncoder | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -224,12 +225,30 @@ class CrowdNavPPPolicy(nn.Module):
             )
         self.gst_predictor = gst_predictor
 
-        self.obstacle_encoder = ObstacleEncoder(
-            ObstacleEncoderConfig(
-                ray_feature_dim=64,
-                embedding_dim=config.interaction_embedding_dim,
+        # Injected encoder wins (matches the gst_predictor pattern: built
+        # once, possibly pretrained, injected read-only). Only build a
+        # default when one is actually needed and none was given.
+        self.obstacle_encoder = obstacle_encoder
+        if self.obstacle_encoder is None and config.use_obstacle_encoder:
+            self.obstacle_encoder = ObstacleEncoder(
+                ObstacleEncoderConfig(
+                    ray_feature_dim=RAY_FEATURE_DIM,
+                    embedding_dim=config.interaction_embedding_dim,
+                )
             )
-        )
+
+        # Down-project only if the encoder's output width doesn't already
+        # match interaction_embedding_dim -- the default-constructed
+        # encoder above is already built at that width, so this is a
+        # no-op (Identity) unless a caller injects a mismatched one.
+        self._obstacle_embed_down: nn.Module = nn.Identity()
+        if self.obstacle_encoder is not None:
+            obstacle_output_dim = self.obstacle_encoder.config.output_dim
+            if obstacle_output_dim != config.interaction_embedding_dim:
+                self._obstacle_embed_down = nn.Linear(
+                    obstacle_output_dim, config.interaction_embedding_dim
+                )
+
         self.robot_encoder = RobotStateEncoder(
             RobotStateEncoderConfig(
                 robot_feature_dim=config.robot_feature_dim,

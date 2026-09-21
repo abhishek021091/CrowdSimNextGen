@@ -189,8 +189,7 @@ class ObservationEncoder:
         scan = self.obstacle_detector.sense(
             robot_x,
             robot_y,
-            self._cached_obstacle_polygons,
-            boundary=self._cached_boundary_ring,
+            [*self._cached_obstacle_polygons, self._cached_boundary_ring],
             heading=0.0,
         )
         return scan_to_features(scan, self.obstacle_detector.config.max_range)

@@ -108,7 +108,6 @@ class RecurrentNodeUpdate(nn.Module):
         crowd_context: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
-        obstacle_context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Advance the recurrent state by one tick.
 
@@ -118,19 +117,12 @@ class RecurrentNodeUpdate(nn.Module):
             hidden_state: ``[nenv, rnn_hidden_size]``.
             not_done_mask: ``[nenv]`` -- ``1.0`` to carry hidden_state
                 forward, ``0.0`` to reset it before this tick.
-            obstacle_context: ``[nenv, input_dim]``, required if and
-                only if ``config.use_obstacle_context`` is True (e.g.
-                an ``ObstacleEncoder`` embedding, projected to
-                ``input_dim``). ``None`` when obstacle encoding is
-                disabled for this policy.
 
         Returns:
             ``(output, new_hidden_state)``.
 
         Raises:
-            ValueError: On any shape mismatch, or if
-                ``obstacle_context``'s presence disagrees with
-                ``config.use_obstacle_context``.
+            ValueError: On any shape mismatch.
         """
         nenv, input_dim = robot_embedding.shape
         if input_dim != self.config.input_dim:

@@ -25,7 +25,6 @@ from torch import Tensor, nn
 from navcore.entities.components.sensors.obstacle_detector import (
     RAY_FEATURE_DIM,
     ObstacleScan,
-    scan_to_features,
 )
 
 
