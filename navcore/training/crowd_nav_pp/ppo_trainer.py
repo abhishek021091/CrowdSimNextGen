@@ -73,7 +73,7 @@ class PPOConfig:
     clip_range_vf: float | None = 0.2
     ent_coef: float = 0.00
     vf_coef: float = 0.5
-    max_grad_norm: float = 0.5
+    max_grad_norm: float | None = 0.5
     learning_rate: float = 3e-4
     normalize_advantage: bool = True
     device: str = "cpu"
@@ -413,9 +413,17 @@ class CrowdNavPPTrainer:
 
             self.optimizer.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.policy.parameters(), self.config.max_grad_norm
-            )
+            if self.config.max_grad_norm is not None:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), self.config.max_grad_norm
+                )
+            else:
+                # No clipping, but still compute the norm so grad_norm
+                # stays meaningful in the logs/metrics.
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), float("inf")
+                )
+
             self.optimizer.step()
 
             with torch.no_grad():

@@ -39,9 +39,10 @@ def main() -> None:
     parser.add_argument("--ent-coef", type=float, default=0.00)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--no-grad-clip", action="store_true", default=False)
     parser.add_argument("--max-neighbors", type=int, default=10)
     parser.add_argument("--history-steps", type=int, default=5)
-    parser.add_argument("--max-episode-steps", type=int, default=500)
+    parser.add_argument("--max-episode-steps", type=int, default=1500)
     parser.add_argument("--use-obstacle-encoder", action="store_true", default=False)
     parser.add_argument("--obstacle-num-rays", type=int, default=60)
     parser.add_argument("--obstacle-max-range", type=float, default=5.0)
@@ -113,7 +114,7 @@ def main() -> None:
         clip_range_vf=args.clip_range_vf,
         ent_coef=args.ent_coef,
         vf_coef=args.vf_coef,
-        max_grad_norm=args.max_grad_norm,
+        max_grad_norm=None if args.no_grad_clip else args.max_grad_norm,
         device=args.device,
     )
 

@@ -55,7 +55,7 @@ class CrowdSimEnvConfig:
     action_mode: ActionMode = ActionMode.VELOCITY
     max_neighbors: int = 10
     history_steps: int = 8
-    max_episode_steps: int = 500
+    max_episode_steps: int = 5000
     robot_visible: bool = False
     include_static_obstacles: bool = True
     orca_config_file: str = "orca.toml"

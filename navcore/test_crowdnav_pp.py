@@ -19,12 +19,16 @@ from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.gym_wrapper.crowd_sim_env import CrowdSimEnv
 from navcore.gym_wrapper.observation_encoder import ObservationEncoder
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
+from navcore.policies.crowdnav_pp.obstacle_encoder import (
+    ObstacleEncoder,
+    ObstacleEncoderConfig,
+)
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.step.step import Step
 from navcore.visualization.visualizer import Visualizer
 
 CHECKPOINT_PATH = (
-    "./navcore/training/crowd_nav_pp/checkpoints/run3/crowdnav_pp_step6881280.pt"
+    "./navcore/training/crowd_nav_pp/checkpoints/run6/crowdnav_pp_step491520.pt"
 )
 
 
@@ -53,12 +57,18 @@ class CrowdNavPPLiveDemo:
         deterministic: bool = True,
         sleep_seconds: float = 0.03,
     ) -> None:
-        self.policy = (
-            policy if policy is not None else CrowdNavPPPolicy(CrowdNavPPPolicyConfig())
-        )
+        if policy is not None:
+            self.policy = policy
+        else:
+            obstacle_encoder = ObstacleEncoder(
+                ObstacleEncoderConfig()
+            )  # matches training's default (128-dim)
+            self.policy = CrowdNavPPPolicy(
+                CrowdNavPPPolicyConfig(use_obstacle_encoder=True),
+                obstacle_encoder=obstacle_encoder,
+            )
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(self.policy.action_head.log_std.exp())
         self.policy.eval()
         self.deterministic = deterministic
         self.sleep_seconds = sleep_seconds
@@ -98,6 +108,7 @@ class CrowdNavPPLiveDemo:
         neighbor_history_mask = torch.from_numpy(
             obs["neighbor_history_mask"]
         ).unsqueeze(0)
+        ray_features = torch.from_numpy(obs["ray_features"]).unsqueeze(0)
         not_done_mask = torch.ones(1)
 
         with torch.no_grad():
@@ -109,9 +120,9 @@ class CrowdNavPPLiveDemo:
                 neighbor_history_mask,
                 self.hidden_state,
                 not_done_mask,
+                ray_features=ray_features,
                 deterministic=self.deterministic,
             )
-
         return CrowdSimEnv._decode_velocity_action(action.squeeze(0).numpy())
 
     def _reset_episode(self) -> None:

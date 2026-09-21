@@ -12,7 +12,7 @@ randomize_radius = true
 gate = { enabled = false, num_gates = 0 }
 
 [rectangular_table]
-num_tables = 7
+num_tables = 0
 center = [
     [
         0.0,

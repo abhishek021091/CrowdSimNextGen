@@ -203,7 +203,7 @@ class Step:
         crowd_velocities: dict[int, Velocity] = {}
 
         for ped_id, ped in self.env.crowd.items():
-            if self.rand.random() < 0.2 and ped_id % 10 == 0:
+            if self.rand.random() < 0.2:
                 crowd_velocities[ped_id] = Velocity(0, 0)
                 continue
             assert ped.sensor is not None
