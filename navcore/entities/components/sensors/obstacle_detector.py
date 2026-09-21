@@ -115,6 +115,49 @@ class ObstacleScan:
     ray_angles: np.ndarray
 
 
+#: Per-ray feature layout produced by `scan_to_features`:
+#: [hit_mask, distance_norm, dx_norm, dy_norm, sin(ray_angle), cos(ray_angle)].
+RAY_FEATURE_DIM = 6
+
+
+def scan_to_features(scan: ObstacleScan, max_range: float) -> np.ndarray:
+    """Convert one `ObstacleScan` into a `(num_rays, RAY_FEATURE_DIM)` array.
+
+    Lives here, not in `policies.crowdnav_pp.obstacle_encoder` (where
+    this used to live) -- this is a pure sensor-encoding concern with
+    no torch dependency, and keeping it in the policy package would
+    force anything that wants ray features (e.g. `ObservationEncoder`)
+    to import from the policy layer, backwards from how this project
+    layers environment/observation code under policies.
+
+    Returns:
+        `(num_rays, RAY_FEATURE_DIM)` float32 array:
+        `[hit_mask, distance / max_range, dx / max_range, dy / max_range,
+        sin(theta), cos(theta)]` per ray.
+
+        NOTE: theta is recomputed as a uniform `2*pi*i/num_rays` sweep
+        starting at angle 0 -- it does NOT read `scan.ray_angles`. Only
+        correct for a scan cast with `heading=0.0` and a full `2*pi`
+        fov (what `ObservationEncoder` always uses -- see its own
+        docstring). Not fixed here; flagged as a trap for whoever wires
+        a heading-relative or partial-fov scan in later.
+    """
+    num_rays = scan.hit_mask.shape[0]
+    features = np.zeros((num_rays, RAY_FEATURE_DIM), dtype=np.float32)
+
+    features[:, 0] = scan.hit_mask.astype(np.float32)
+    features[:, 1] = scan.distances / max_range
+    features[:, 2] = scan.relative_positions[:, 0] / max_range
+    features[:, 3] = scan.relative_positions[:, 1] / max_range
+
+    indices = np.arange(num_rays, dtype=np.float32)
+    theta = 2.0 * np.pi * indices / num_rays
+    features[:, 4] = np.sin(theta)
+    features[:, 5] = np.cos(theta)
+
+    return features
+
+
 class ObstacleDetector:
     """Casts a ray fan from a point against ground-truth obstacles and boundary.
 

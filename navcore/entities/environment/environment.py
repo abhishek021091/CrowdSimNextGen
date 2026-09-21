@@ -65,9 +65,9 @@ class Environment:
         if robot_pose is None:
             raise RuntimeError("Robot pose has not been initialized.")
         is_out_of_bounds = (
-            robot_pose.px < -w
-            or robot_pose.px > w
-            or robot_pose.py < -h
-            or robot_pose.py > h
+            robot_pose.px - self.robot.radius - self.info.safety_distance < -w
+            or robot_pose.px + self.robot.radius + self.info.safety_distance > w
+            or robot_pose.py - self.robot.radius - self.info.safety_distance < -h
+            or robot_pose.py + self.robot.radius + self.info.safety_distance > h
         )
         return is_out_of_bounds

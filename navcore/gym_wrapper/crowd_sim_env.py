@@ -35,6 +35,7 @@ from gymnasium import spaces
 from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.entities.agents.robot import Robot
 from navcore.entities.components.geometry.vector2 import Vector2
+from navcore.entities.components.sensors.obstacle_detector import ObstacleDetectorConfig
 from navcore.entities.components.velocity import Velocity
 from navcore.entities.environment.environment import Environment
 from navcore.gym_wrapper.observation_encoder import ObservationEncoder
@@ -51,24 +52,6 @@ class ActionMode(Enum):
 
 @dataclass(slots=True, frozen=True)
 class CrowdSimEnvConfig:
-    """Tunables for CrowdSimEnv that aren't part of the injected Task.
-
-    Attributes:
-        action_mode: See module docstring.
-        max_neighbors: Fixed neighbor-slot count for observations.
-        history_steps: Temporal frames retained for each visible neighbor.
-        max_episode_steps: Truncation limit; independent of the Task's
-            own termination logic.
-        robot_visible: Whether pedestrians can see the robot in their
-            own sensor observations this episode.
-        include_static_obstacles: Whether to build static obstacles for
-            this scenario. CrowdNav-style goal walking defaults to an
-            obstacle-free arena; non-RL EnvironmentBuilder callers retain
-            their existing obstacle-filled default.
-        orca_config_file: ORCA reasoning-parameter TOML, forwarded to
-            DecentralizedORCAPlanner (see its own docstring).
-    """
-
     action_mode: ActionMode = ActionMode.VELOCITY
     max_neighbors: int = 10
     history_steps: int = 8
@@ -76,6 +59,8 @@ class CrowdSimEnvConfig:
     robot_visible: bool = False
     include_static_obstacles: bool = True
     orca_config_file: str = "orca.toml"
+    obstacle_num_rays: int = 60
+    obstacle_max_range: float = 5.0
 
 
 class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
@@ -101,6 +86,10 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
         self._obs_encoder = ObservationEncoder(
             max_neighbors=self.config.max_neighbors,
             history_steps=self.config.history_steps,
+            obstacle_detector_config=ObstacleDetectorConfig(
+                num_rays=self.config.obstacle_num_rays,
+                max_range=self.config.obstacle_max_range,
+            ),
         )
         self._waypoint_mission: RLWaypointMission | None = None
         self._step_driver: Step | None = None
@@ -133,7 +122,7 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
         )
         self.env = self._env_builder.reset(random_seed=episode_seed)
         self.task.reset(self.env)
-        self._obs_encoder.reset()
+        self._obs_encoder.reset(self.env)
 
         robot_mission = None
         self._waypoint_mission = None

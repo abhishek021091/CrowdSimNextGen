@@ -48,26 +48,11 @@ from torch import Tensor, nn
 
 @dataclass(slots=True, frozen=True)
 class RecurrentNodeUpdateConfig:
-    """Hyperparameters for :class:`RecurrentNodeUpdate`.
-
-    Attributes:
-        input_dim: Width of both the robot embedding and the crowd
-            context vector arriving at this layer (the ``embedding_dim``
-            shared by ``RobotStateEncoder``/``RobotHumanAttention``).
-        node_embedding_size: Width each of the two inputs is separately
-            projected to before concatenation. 64 in the original
-            (``human_node_embedding_size``).
-        rnn_hidden_size: GRU hidden state width. 128 in the original
-            (``human_node_rnn_size``).
-        output_size: Width of the final projected output, fed to the
-            actor/critic heads downstream. 256 in the original
-            (``human_node_output_size``).
-    """
-
     input_dim: int
     node_embedding_size: int = 64
     rnn_hidden_size: int = 128
     output_size: int = 256
+    use_obstacle_context: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,19 +68,6 @@ class RecurrentNodeUpdateConfig:
 
 
 class RecurrentNodeUpdate(nn.Module):
-    """One recurrent tick: fold robot + crowd-context into GRU memory.
-
-    This is where the network gets memory across ticks -- everything
-    upstream (``RobotStateEncoder``, ``HumanHumanAttention``,
-    ``RobotHumanAttention``) is a pure per-tick function of the current
-    observation; this class is the only stateful piece, and its state
-    (the GRU hidden vector) is owned by the caller, not this module --
-    consistent with the project's "no hidden state inside a component;
-    the caller threads it explicitly" convention (mirrors how ``Step``
-    threads simulation state rather than a ``Mission`` keeping its own
-    copy of the world).
-    """
-
     def __init__(self, config: RecurrentNodeUpdateConfig) -> None:
         super().__init__()
         self.config = config
@@ -106,13 +78,20 @@ class RecurrentNodeUpdate(nn.Module):
         self.context_embed = nn.Sequential(
             nn.Linear(config.input_dim, config.node_embedding_size), nn.ReLU()
         )
+        # Obstacle context gets its own projection, not context_embed --
+        # crowd-context and obstacle-scan features are unrelated signals
+        # and have no business sharing one set of weights.
+        self.obstacle_embed: nn.Module | None = None
+        num_branches = 2
+        if config.use_obstacle_context:
+            self.obstacle_embed = nn.Sequential(
+                nn.Linear(config.input_dim, config.node_embedding_size), nn.ReLU()
+            )
+            num_branches = 3
 
         self.gru_cell = nn.GRUCell(
-            config.node_embedding_size * 2, config.rnn_hidden_size
+            config.node_embedding_size * num_branches, config.rnn_hidden_size
         )
-        # Matches the original's RNNBase initialization: orthogonal
-        # weights, zero biases -- a standard, well-behaved RNN init, kept
-        # faithfully rather than left at PyTorch's default.
         for name, param in self.gru_cell.named_parameters():
             if "bias" in name:
                 nn.init.constant_(param, 0)
@@ -124,48 +103,37 @@ class RecurrentNodeUpdate(nn.Module):
     def initial_hidden_state(
         self, nenv: int, device: torch.device | None = None
     ) -> Tensor:
-        """Return a zeroed hidden state for ``nenv`` parallel environments.
-
-        Convenience for callers starting a fresh rollout -- equivalent
-        to, but more discoverable than, ``torch.zeros(nenv,
-        config.rnn_hidden_size)``.
-        """
         return torch.zeros(nenv, self.config.rnn_hidden_size, device=device)
 
     def forward(
         self,
         robot_embedding: Tensor,
         crowd_context: Tensor,
-        obstacle_context: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
+        obstacle_context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Advance the recurrent state by one tick.
 
         Args:
-            robot_embedding: ``[nenv, input_dim]`` -- e.g.
-                ``RobotStateEncoder``'s output for this tick, with the
-                ``seq_len`` axis already squeezed out by the caller.
-            crowd_context: ``[nenv, input_dim]`` -- e.g.
-                ``RobotHumanAttention``'s output for this tick, same
-                squeeze convention.
-            hidden_state: ``[nenv, rnn_hidden_size]`` -- the previous
-                tick's hidden state (see :meth:`initial_hidden_state` for
-                episode start).
-            not_done_mask: ``[nenv]``, ``1.0`` to carry ``hidden_state``
-                forward, ``0.0`` to reset it to zero before this tick's
-                update -- i.e. ``1.0 - done`` from the previous tick's
-                step result. Matches the original's ``masks`` convention.
+            robot_embedding: ``[nenv, input_dim]``.
+            crowd_context: ``[nenv, input_dim]``.
+            hidden_state: ``[nenv, rnn_hidden_size]``.
+            not_done_mask: ``[nenv]`` -- ``1.0`` to carry hidden_state
+                forward, ``0.0`` to reset it before this tick.
+            obstacle_context: ``[nenv, input_dim]``, required if and
+                only if ``config.use_obstacle_context`` is True (e.g.
+                an ``ObstacleEncoder`` embedding, projected to
+                ``input_dim``). ``None`` when obstacle encoding is
+                disabled for this policy.
 
         Returns:
-            ``(output, new_hidden_state)``: ``output`` is
-            ``[nenv, output_size]``, ready for the actor/critic heads;
-            ``new_hidden_state`` is ``[nenv, rnn_hidden_size]``, to be
-            passed back in on the next tick.
+            ``(output, new_hidden_state)``.
 
         Raises:
-            ValueError: If any input's shape is inconsistent with
-                ``config`` or with the others.
+            ValueError: On any shape mismatch, or if
+                ``obstacle_context``'s presence disagrees with
+                ``config.use_obstacle_context``.
         """
         nenv, input_dim = robot_embedding.shape
         if input_dim != self.config.input_dim:
@@ -176,11 +144,6 @@ class RecurrentNodeUpdate(nn.Module):
         if tuple(crowd_context.shape) != (nenv, self.config.input_dim):
             raise ValueError(
                 f"crowd_context shape {tuple(crowd_context.shape)} does not "
-                f"match expected {(nenv, self.config.input_dim)}."
-            )
-        if tuple(obstacle_context.shape) != (nenv, self.config.input_dim):
-            raise ValueError(
-                f"obstacle_context shape {tuple(obstacle_context.shape)} does not "
                 f"match expected {(nenv, self.config.input_dim)}."
             )
         if tuple(hidden_state.shape) != (nenv, self.config.rnn_hidden_size):
@@ -194,10 +157,32 @@ class RecurrentNodeUpdate(nn.Module):
                 f"match expected {(nenv,)}."
             )
 
-        robot_branch = self.robot_embed(robot_embedding)
-        context_branch = self.context_embed(crowd_context)
-        obstacle_branch = self.context_embed(obstacle_context)
-        concat = torch.cat((robot_branch, context_branch, obstacle_branch), dim=-1)
+        if self.config.use_obstacle_context:
+            if obstacle_context is None:
+                raise ValueError(
+                    "This RecurrentNodeUpdate is configured with "
+                    "use_obstacle_context=True but forward() was called "
+                    "without obstacle_context."
+                )
+            if tuple(obstacle_context.shape) != (nenv, self.config.input_dim):
+                raise ValueError(
+                    f"obstacle_context shape {tuple(obstacle_context.shape)} "
+                    f"does not match expected {(nenv, self.config.input_dim)}."
+                )
+        elif obstacle_context is not None:
+            raise ValueError(
+                "obstacle_context was given but this RecurrentNodeUpdate was "
+                "configured with use_obstacle_context=False."
+            )
+
+        branches = [
+            self.robot_embed(robot_embedding),
+            self.context_embed(crowd_context),
+        ]
+        if obstacle_context is not None:
+            assert self.obstacle_embed is not None
+            branches.append(self.obstacle_embed(obstacle_context))
+        concat = torch.cat(branches, dim=-1)
 
         reset_hidden = hidden_state * not_done_mask.unsqueeze(-1)
         new_hidden = self.gru_cell(concat, reset_hidden)

@@ -22,11 +22,11 @@ import numpy.typing as npt
 import torch
 from torch import Tensor, nn
 
-from navcore.sensor.obstacle_detector import ObstacleScan
-
-#: Per-ray feature layout fed to the CNN:
-#: [hit_mask, distance_norm, dx_norm, dy_norm, sin(ray_angle), cos(ray_angle)].
-RAY_FEATURE_DIM = 6
+from navcore.entities.components.sensors.obstacle_detector import (
+    RAY_FEATURE_DIM,
+    ObstacleScan,
+    scan_to_features,
+)
 
 
 @dataclass(slots=True, frozen=True)

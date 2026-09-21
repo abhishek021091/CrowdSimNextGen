@@ -15,6 +15,10 @@ import torch
 
 from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimEnvConfig
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
+from navcore.policies.crowdnav_pp.obstacle_encoder import (
+    ObstacleEncoder,
+    ObstacleEncoderConfig,
+)
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.crowd_nav_pp.ppo_trainer import CrowdNavPPTrainer, PPOConfig
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
@@ -38,6 +42,9 @@ def main() -> None:
     parser.add_argument("--max-neighbors", type=int, default=10)
     parser.add_argument("--history-steps", type=int, default=5)
     parser.add_argument("--max-episode-steps", type=int, default=500)
+    parser.add_argument("--use-obstacle-encoder", action="store_true", default=False)
+    parser.add_argument("--obstacle-num-rays", type=int, default=60)
+    parser.add_argument("--obstacle-max-range", type=float, default=5.0)
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -61,6 +68,8 @@ def main() -> None:
         max_neighbors=args.max_neighbors,
         history_steps=args.history_steps,
         max_episode_steps=args.max_episode_steps,
+        obstacle_num_rays=args.obstacle_num_rays,
+        obstacle_max_range=args.obstacle_max_range,
     )
 
     # Each parallel slot needs its own CrowdSimEnv + GoalReachingTask instance
@@ -78,12 +87,20 @@ def main() -> None:
             args.gst_checkpoint, device=args.device
         )
 
+    obstacle_encoder = None
+    if args.use_obstacle_encoder:
+        obstacle_encoder = ObstacleEncoder(ObstacleEncoderConfig())
+
     # Defaults already match ObservationEncoder's actual feature widths
     # (robot_feature_dim=8, neighbor_feature_dim=5) -- see policy.py's
     # _NEIGHBOR_MOTION_SLICE comment for the same real coupling point.
     policy = CrowdNavPPPolicy(
-        CrowdNavPPPolicyConfig(use_gst_prediction=args.use_gst_prediction),
+        CrowdNavPPPolicyConfig(
+            use_gst_prediction=args.use_gst_prediction,
+            use_obstacle_encoder=args.use_obstacle_encoder,
+        ),
         gst_predictor=gst_predictor,
+        obstacle_encoder=obstacle_encoder,
     )
 
     ppo_config = PPOConfig(

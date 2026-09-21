@@ -96,6 +96,7 @@ from navcore.policies.crowdnav_pp.human_human_attention import (
     HumanHumanAttention,
     HumanHumanAttentionConfig,
 )
+from navcore.policies.crowdnav_pp.obstacle_encoder import ObstacleEncoder
 from navcore.policies.crowdnav_pp.recurrent_node_update import (
     RecurrentNodeUpdate,
     RecurrentNodeUpdateConfig,
@@ -178,6 +179,7 @@ class CrowdNavPPPolicyConfig:
     action_dim: int = 2
     use_gst_prediction: bool = False
     gst_pred_length: int = 5
+    use_obstacle_encoder: bool = False
 
     @property
     def spatial_edge_feature_dim(self) -> int:
@@ -199,10 +201,14 @@ class CrowdNavPPPolicy(nn.Module):
     Attributes:
         config: This policy's hyperparameters.
         gst_predictor: A pretrained GSTPredictor for making future trajectory predictions.
+        obstacle_encoder: A pretrained ObstacleEncoder for encoding obstacle information.
     """
 
     def __init__(
-        self, config: CrowdNavPPPolicyConfig, gst_predictor: GSTPredictor | None = None
+        self,
+        config: CrowdNavPPPolicyConfig,
+        gst_predictor: GSTPredictor | None = None,
+        obstacle_encoder: ObstacleEncoder | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -213,7 +219,24 @@ class CrowdNavPPPolicy(nn.Module):
                 "(see GSTPredictorTrainer.load_predictor) -- GST is trained "
                 "separately, never jointly with this policy."
             )
+        if config.use_obstacle_encoder and obstacle_encoder is None:
+            raise ValueError(
+                "use_obstacle_encoder=True requires a pretrained obstacle_encoder "
+                "(see ObstacleEncoderTrainer.load_encoder) -- ObstacleEncoder is trained "
+                "separately, never jointly with this policy."
+            )
         self.gst_predictor = gst_predictor
+        self.obstacle_encoder = obstacle_encoder
+        self._obstacle_embed_down: nn.Module = nn.Identity()
+        if obstacle_encoder is not None:
+            self._obstacle_embed_down = (
+                nn.Identity()
+                if obstacle_encoder.config.output_dim
+                == config.interaction_embedding_dim
+                else nn.Linear(
+                    obstacle_encoder.config.output_dim, config.interaction_embedding_dim
+                )
+            )
         self.robot_encoder = RobotStateEncoder(
             RobotStateEncoderConfig(
                 robot_feature_dim=config.robot_feature_dim,
@@ -254,6 +277,7 @@ class CrowdNavPPPolicy(nn.Module):
                 node_embedding_size=config.node_embedding_size,
                 rnn_hidden_size=config.rnn_hidden_size,
                 output_size=config.node_output_size,
+                use_obstacle_context=config.use_obstacle_encoder,
             )
         )
         self.actor_critic_heads = ActorCriticHeads(
@@ -289,6 +313,7 @@ class CrowdNavPPPolicy(nn.Module):
         neighbor_history_mask: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
+        ray_features: Tensor | None = None,
     ) -> tuple[Independent, Tensor, Tensor]:
         """Run one recurrent tick for a batch of environments.
 
@@ -370,8 +395,27 @@ class CrowdNavPPPolicy(nn.Module):
         ).squeeze(0)
         robot_embedding = robot_embedding.squeeze(0).squeeze(-2)
 
+        obstacle_context = None
+        if self.config.use_obstacle_encoder:
+            if ray_features is None:
+                raise ValueError(
+                    "config.use_obstacle_encoder=True but forward() was "
+                    "called without ray_features."
+                )
+            assert self.obstacle_encoder is not None
+            obstacle_embedding = self.obstacle_encoder(ray_features)
+            obstacle_context = self._obstacle_embed_down(obstacle_embedding)
+        elif ray_features is not None:
+            raise ValueError(
+                "ray_features was given but config.use_obstacle_encoder=False."
+            )
+
         node_output, new_hidden_state = self.recurrent_update(
-            robot_embedding, crowd_context, hidden_state, not_done_mask
+            robot_embedding,
+            crowd_context,
+            hidden_state,
+            not_done_mask,
+            obstacle_context=obstacle_context,
         )
 
         value, actor_features = self.actor_critic_heads(node_output)
@@ -388,6 +432,7 @@ class CrowdNavPPPolicy(nn.Module):
         neighbor_history_mask: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
+        ray_features: Tensor | None = None,
         deterministic: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Convenience wrapper: run ``forward`` and sample an action from it.
@@ -406,6 +451,7 @@ class CrowdNavPPPolicy(nn.Module):
             neighbor_history_mask,
             hidden_state,
             not_done_mask,
+            ray_features=ray_features,
         )
         action, log_prob = select_action(distribution, deterministic=deterministic)
         return action, log_prob, value, new_hidden_state

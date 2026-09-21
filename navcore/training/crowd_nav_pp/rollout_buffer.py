@@ -30,6 +30,7 @@ _OBS_KEYS = (
     "neighbor_mask",
     "neighbor_history",
     "neighbor_history_mask",
+    "ray_features",
 )
 
 

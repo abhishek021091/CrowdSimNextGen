@@ -49,16 +49,27 @@ class CollisionChecker:
                 ):
                     return True
             elif isinstance(obstacle.geometry, Rectangle):
-                # Check if the agent is within the rectangle bounds
-                half_width = obstacle.geometry.width / 2
-                half_height = obstacle.geometry.height / 2
-                if (
-                    obstacle_pose.x - half_width
-                    <= agent_pose.px
-                    <= obstacle_pose.x + half_width
-                    and obstacle_pose.y - half_height
-                    <= agent_pose.py
-                    <= obstacle_pose.y + half_height
-                ):
+                # Calculate the effective radius of the agent
+                effective_radius = self.agent.radius + self.env.info.safety_distance
+
+                # Calculate rectangle bounds
+                half_width = obstacle.geometry.width / 2.0
+                half_height = obstacle.geometry.height / 2.0
+
+                min_x = obstacle_pose.x - half_width
+                max_x = obstacle_pose.x + half_width
+                min_y = obstacle_pose.y - half_height
+                max_y = obstacle_pose.y + half_height
+
+                # Find the closest point on the rectangle to the agent's center
+                closest_x = max(min_x, min(agent_pose.px, max_x))
+                closest_y = max(min_y, min(agent_pose.py, max_y))
+
+                # Calculate the squared distance from the agent's center to this closest point
+                dx = agent_pose.px - closest_x
+                dy = agent_pose.py - closest_y
+
+                # If the squared distance is less than the squared radius, they intersect
+                if (dx * dx + dy * dy) <= (effective_radius * effective_radius):
                     return True
-        return False
+            return False

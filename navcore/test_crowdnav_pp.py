@@ -119,7 +119,7 @@ class CrowdNavPPLiveDemo:
         seed = self.env.info.random_seed + self.episode_count
         self.env = self.env_builder.reset(random_seed=seed)
         self.step_driver = self._build_step_driver()
-        self.encoder.reset()
+        self.encoder.reset(self.env)
         self.hidden_state = self.policy.initial_hidden_state(nenv=1)
 
     def _respawn_pedestrians(self, result) -> None:

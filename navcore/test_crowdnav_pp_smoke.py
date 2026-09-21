@@ -270,6 +270,93 @@ def _test_zero_neighbors_no_nan():
     )
     assert torch.isfinite(value).all(), "NaN in value with 0 neighbors"
 
+    @check(
+        "6. Obstacle-encoder path: forward() runs, shapes correct, gradients reach ObstacleEncoder"
+    )
+    def _test_obstacle_encoder_integration():
+        from navcore.policies.crowdnav_pp.obstacle_encoder import (
+            ObstacleEncoder,
+            ObstacleEncoderConfig,
+            RAY_FEATURE_DIM,
+        )
+
+        env, obs = _build_env_and_obs()
+        obstacle_encoder = ObstacleEncoder(ObstacleEncoderConfig(embedding_dim=64))
+        policy_config = CrowdNavPPPolicyConfig(
+            robot_feature_dim=obs["robot"].shape[-1],
+            neighbor_feature_dim=obs["neighbors"].shape[-1],
+            use_obstacle_encoder=True,
+        )
+        policy = CrowdNavPPPolicy(policy_config, obstacle_encoder=obstacle_encoder)
+        policy.train()
+
+        nenv, num_rays = 2, 60
+        batch = _to_batch(obs, nenv=nenv)
+        ray_features = torch.randn(nenv, num_rays, RAY_FEATURE_DIM)
+        hidden = policy.initial_hidden_state(nenv=nenv)
+        not_done = torch.ones(nenv)
+
+        distribution, value, new_hidden = policy.forward(
+            batch["robot"],
+            batch["neighbors"],
+            batch["neighbor_mask"],
+            batch["neighbor_history"],
+            batch["neighbor_history_mask"],
+            hidden,
+            not_done,
+            ray_features=ray_features,
+        )
+        assert value.shape == (nenv, 1)
+
+        loss = distribution.rsample().pow(2).sum() + value.sum()
+        loss.backward()
+        assert obstacle_encoder.net[0].weight.grad is not None
+        assert torch.any(obstacle_encoder.net[0].weight.grad != 0)
+
+    @check(
+        "6. Obstacle-encoder path: forward() runs, shapes correct, gradients reach ObstacleEncoder"
+    )
+    def _test_obstacle_encoder_integration():
+        from navcore.policies.crowdnav_pp.obstacle_encoder import (
+            ObstacleEncoder,
+            ObstacleEncoderConfig,
+        )
+
+        env, obs = _build_env_and_obs()
+        obstacle_encoder = ObstacleEncoder(ObstacleEncoderConfig(embedding_dim=64))
+        policy_config = CrowdNavPPPolicyConfig(
+            robot_feature_dim=obs["robot"].shape[-1],
+            neighbor_feature_dim=obs["neighbors"].shape[-1],
+            use_obstacle_encoder=True,
+        )
+        policy = CrowdNavPPPolicy(policy_config, obstacle_encoder=obstacle_encoder)
+        policy.train()
+
+        nenv = 2
+        batch = _to_batch(obs, nenv=nenv)  # now includes real "ray_features"
+        hidden = policy.initial_hidden_state(nenv=nenv)
+        not_done = torch.ones(nenv)
+
+        distribution, value, new_hidden = policy.forward(
+            batch["robot"],
+            batch["neighbors"],
+            batch["neighbor_mask"],
+            batch["neighbor_history"],
+            batch["neighbor_history_mask"],
+            hidden,
+            not_done,
+            ray_features=batch["ray_features"],
+        )
+        assert value.shape == (nenv, 1), f"value shape {value.shape}"
+
+        loss = distribution.rsample().pow(2).sum() + value.sum()
+        loss.backward()
+
+        assert obstacle_encoder.net[0].weight.grad is not None
+        assert torch.any(obstacle_encoder.net[0].weight.grad != 0), (
+            "No gradient reached ObstacleEncoder's first conv layer"
+        )
+
 
 def main() -> int:
     failed = 0

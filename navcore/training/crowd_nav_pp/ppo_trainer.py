@@ -161,18 +161,6 @@ class CrowdNavPPTrainer:
     # -- rollout collection ---------------------------------------------------
 
     def collect_rollout(self) -> dict[str, float]:
-        """Collect config.n_steps ticks per env, then compute GAE targets.
-
-        Resumes from wherever the previous rollout (or, on the first
-        call, a fresh env.reset()) left off -- the recurrent hidden
-        state and every env's in-progress episode both carry across
-        rollout boundaries; only PPO's data window resets each call.
-
-        Returns:
-            A small dict of collection-time diagnostics (episodes
-            completed this rollout across all envs, their mean total
-            reward).
-        """
         self.policy.eval()
         self.buffer.start(self._hidden_state)
 
@@ -181,6 +169,7 @@ class CrowdNavPPTrainer:
 
         episode_rewards: list[float] = []
         episode_reward = np.zeros(self.n_envs, dtype=np.float32)
+        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
 
         for _ in range(self.config.n_steps):
             not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
@@ -188,6 +177,10 @@ class CrowdNavPPTrainer:
             not_done_mask_t = torch.as_tensor(
                 not_done_mask, dtype=torch.float32, device=self.device
             )
+
+            extra_kwargs = {}
+            if use_obstacle_encoder:
+                extra_kwargs["ray_features"] = obs_t["ray_features"]
 
             with torch.no_grad():
                 action_t, log_prob_t, value_t, new_hidden = self.policy.act(
@@ -199,6 +192,7 @@ class CrowdNavPPTrainer:
                     self._hidden_state,
                     not_done_mask_t,
                     deterministic=False,
+                    **extra_kwargs,
                 )
 
             action_np = action_t.cpu().numpy().astype(np.float32)
@@ -234,6 +228,9 @@ class CrowdNavPPTrainer:
             mask_t = torch.as_tensor(
                 bootstrap_not_done_mask, dtype=torch.float32, device=self.device
             )
+            extra_kwargs = {}
+            if use_obstacle_encoder:
+                extra_kwargs["ray_features"] = obs_t["ray_features"]
             _, last_value_t, _ = self.policy.forward(
                 obs_t["robot"],
                 obs_t["neighbors"],
@@ -242,6 +239,7 @@ class CrowdNavPPTrainer:
                 obs_t["neighbor_history_mask"],
                 self._hidden_state,
                 mask_t,
+                **extra_kwargs,
             )
 
         self.buffer.compute_returns_and_advantages(
@@ -260,20 +258,6 @@ class CrowdNavPPTrainer:
     # -- PPO update -------------------------------------------------------------
 
     def _recompute_sequence(self) -> tuple[Tensor, Tensor, Tensor]:
-        """Re-run the policy sequentially over the whole buffered rollout.
-
-        Starts from the buffer's stored (detached) seed hidden state and
-        threads each step's stored not_done_mask through, so hidden-
-        state reset points exactly match what was seen at collection
-        time -- only the network's *weights* differ between this pass
-        and the original rollout. Gradients flow through every step of
-        this loop; see module docstring for why this is a whole-sequence
-        pass rather than a chunked one. Each step's batch dimension is
-        n_envs (not 1), so every env's trajectory is recomputed together.
-
-        Returns:
-            (log_probs, values, entropies), each shaped [T, n_envs].
-        """
         obs = self.buffer.observations()
         not_done_masks = self.buffer.not_done_masks()
         actions = self.buffer.actions()
@@ -282,11 +266,15 @@ class CrowdNavPPTrainer:
         hidden = self.buffer.initial_hidden_state
         assert hidden is not None
 
+        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
         log_probs: list[Tensor] = []
         values: list[Tensor] = []
         entropies: list[Tensor] = []
 
         for t in range(T):
+            extra_kwargs = {}
+            if use_obstacle_encoder:
+                extra_kwargs["ray_features"] = obs["ray_features"][t]
             distribution, value, hidden = self.policy.forward(
                 obs["robot"][t],
                 obs["neighbors"][t],
@@ -295,6 +283,7 @@ class CrowdNavPPTrainer:
                 obs["neighbor_history_mask"][t],
                 hidden,
                 not_done_masks[t],
+                **extra_kwargs,
             )
             log_probs.append(distribution.log_prob(actions[t]))
             values.append(value.squeeze(-1))

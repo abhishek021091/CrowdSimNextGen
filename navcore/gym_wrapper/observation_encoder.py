@@ -1,24 +1,6 @@
 """ObservationEncoder: turns live Environment state into a fixed-shape
 Gymnasium observation for the robot.
-
-Kept separate from CrowdSimEnv so the encoding scheme can be swapped or
-unit-tested independently of episode/reward machinery.
-
-Design choices:
-    - Reads the robot's actual RangeSensor observation, not env.crowd
-      directly. Using ground truth here would violate the same
-      information boundary already enforced for ORCA (robot only sees
-      ObservableState -- pose, velocity, radius -- never a neighbor's
-      goal or intent).
-    - Neighbor position is given relative to the robot (absolute
-      velocity is kept as-is); a policy trained on relative geometry
-      generalizes across arbitrary start/goal placements, whereas
-      world-frame coordinates would overfit to this arena's layout.
-    - Neighbors are sorted by distance ascending and truncated/
-      zero-padded to a fixed max_neighbors. A neighbor_mask array is
-      included alongside the padded block: zero-padding alone cannot
-      be told apart from a real neighbor sitting at relative (0, 0),
-      and the mask removes that ambiguity for one bit per slot.
+...
 """
 
 from __future__ import annotations
@@ -29,14 +11,23 @@ from collections import deque
 import numpy as np
 import numpy.typing as npt
 from gymnasium import spaces
+from shapely.geometry import LinearRing
+from shapely.geometry import Polygon as ShapelyPolygon
 
+from navcore.entities.components.sensors.obstacle_detector import (
+    RAY_FEATURE_DIM,
+    ObstacleDetector,
+    ObstacleDetectorConfig,
+    scan_to_features,
+)
 from navcore.entities.components.state import ObservableState
 from navcore.entities.environment.environment import Environment
+from navcore.entities.obstacles.geometry_conversion import (
+    arena_boundary_ring,
+    obstacle_to_shapely_polygon,
+)
 
-#: Per-neighbor feature layout: [rel_px, rel_py, vx, vy, radius].
 _NEIGHBOR_FEATURES = 5
-#: Robot self-feature layout:
-#: [rel_goal_x, rel_goal_y, vx, vy, v_pref, radius, cos(theta), sin(theta)].
 _ROBOT_FEATURES = 8
 
 
@@ -44,12 +35,19 @@ class ObservationEncoder:
     """Encodes ``Environment`` into a fixed-shape observation for the robot.
 
     Attributes:
-        max_neighbors: Fixed neighbor-slot count. When more than
-            max_neighbors are within sensor range, the closest ones are
-            kept and farther ones are dropped.
+        max_neighbors: Fixed neighbor-slot count.
+        obstacle_detector: Ray-casting sensor used to build
+            "ray_features". Stateless itself (see its own docstring);
+            this class owns the per-episode obstacle/boundary geometry
+            it's cast against.
     """
 
-    def __init__(self, max_neighbors: int, history_steps: int = 8) -> None:
+    def __init__(
+        self,
+        max_neighbors: int,
+        history_steps: int = 8,
+        obstacle_detector_config: ObstacleDetectorConfig | None = None,
+    ) -> None:
         if max_neighbors <= 0:
             raise ValueError(f"max_neighbors must be positive, got {max_neighbors!r}.")
         if history_steps <= 0:
@@ -58,9 +56,38 @@ class ObservationEncoder:
         self.history_steps = history_steps
         self._neighbor_history: dict[int, deque[np.ndarray]] = {}
 
-    def reset(self) -> None:
-        """Discard all temporal state at an episode boundary."""
+        self.obstacle_detector = ObstacleDetector(obstacle_detector_config)
+        # Static per-episode obstacle/boundary geometry, in world-frame
+        # shapely form -- built once per episode (see reset()), not
+        # every encode() call. Obstacles are static within an episode
+        # (EnvironmentBuilder only rebuilds them at reset()), so
+        # reconstructing these shapely Polygons every tick would waste
+        # ~num_obstacles Polygon constructions on every one of n_steps
+        # ticks, across every parallel env, for geometry that never
+        # changes between resets.
+        self._cached_obstacle_polygons: list[ShapelyPolygon] = []
+        self._cached_boundary_ring: LinearRing | None = None
+
+    def reset(self, env: Environment | None = None) -> None:
+        """Discard temporal state at an episode boundary.
+
+        Args:
+            env: The new episode's Environment. When given, also
+                refreshes the cached obstacle/boundary geometry used
+                for ray-casting. Callers that only need the
+                temporal-history reset (e.g. ``PolicyFieldVisualizer``,
+                which re-queries the same env's fixed obstacle layout
+                many times per call) may omit it -- the geometry cache
+                is left untouched.
+        """
         self._neighbor_history.clear()
+        if env is not None:
+            self._cached_obstacle_polygons = [
+                obstacle_to_shapely_polygon(obstacle)
+                for key, obstacle in env.obstacles.items()
+                if key != "boundary"
+            ]
+            self._cached_boundary_ring = arena_boundary_ring(env)
 
     @property
     def space(self) -> spaces.Dict:
@@ -90,6 +117,12 @@ class ObservationEncoder:
                 "neighbor_history_mask": spaces.MultiBinary(
                     (self.history_steps, self.max_neighbors)
                 ),
+                "ray_features": spaces.Box(
+                    -inf,
+                    inf,
+                    shape=(self.obstacle_detector.config.num_rays, RAY_FEATURE_DIM),
+                    dtype=np.float32,
+                ),
             }
         )
 
@@ -102,10 +135,12 @@ class ObservationEncoder:
         if robot.sensor is None:
             raise RuntimeError("Robot sensor must be initialized before encoding.")
 
-        # robot_visible only affects whether *pedestrians* see the
-        # robot in their own sensor calls -- it has no effect when the
-        # observing agent is the robot itself. Passed as False purely
-        # for interface compliance with RangeSensor.observe's signature.
+        if self._cached_boundary_ring is None:
+            # Defensive fallback for a caller that never called
+            # reset(env) -- normal CrowdSimEnv usage always does, so
+            # this path shouldn't fire in the training loop.
+            self.reset(env)
+
         neighbor_obs = robot.sensor.observe(env, robot_visible=False)
 
         robot_features: npt.NDArray[np.float32] = np.array(
@@ -125,6 +160,7 @@ class ObservationEncoder:
         neighbors, mask, history, history_mask = self._encode_neighbors(
             robot.pose.px, robot.pose.py, neighbor_obs
         )
+        ray_features = self._encode_ray_features(robot.pose.px, robot.pose.py)
 
         return {
             "robot": robot_features,
@@ -132,8 +168,34 @@ class ObservationEncoder:
             "neighbor_mask": mask,
             "neighbor_history": history,
             "neighbor_history_mask": history_mask,
+            "ray_features": ray_features,
         }
 
+    def _encode_ray_features(
+        self, robot_x: float, robot_y: float
+    ) -> npt.NDArray[np.float32]:
+        """Cast this tick's ray fan and convert it to CNN-ready features.
+
+        heading fixed at 0.0 -- world-frame ray fan, not
+        robot-heading-relative. Resolves ObstacleDetector's own open
+        question #1: the robot is holonomic (robot.toml's
+        `chassis = "holonomic"`), so there's no orientation-constrained
+        motion a heading-relative fan needs to track, and
+        `scan_to_features()` independently assumes ray 0 sits at angle
+        0 -- consistent with heading=0.0, silently wrong otherwise. Do
+        not change this without also fixing `scan_to_features()` to
+        read `scan.ray_angles`.
+        """
+        scan = self.obstacle_detector.sense(
+            robot_x,
+            robot_y,
+            self._cached_obstacle_polygons,
+            boundary=self._cached_boundary_ring,
+            heading=0.0,
+        )
+        return scan_to_features(scan, self.obstacle_detector.config.max_range)
+
+    # _encode_neighbors() and _neighbor_features() unchanged
     def _encode_neighbors(
         self,
         robot_x: float,
