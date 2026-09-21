@@ -177,6 +177,8 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
 
         info: dict[str, Any] = {
             "collision": collided,
+            "out_of_bounds": out_of_bounds,
+            "truncated": truncated,
             "robot_reached_goal": step_result.robot_reached_goal,
         }
         return observation, reward, terminated, truncated, info

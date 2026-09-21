@@ -54,41 +54,16 @@ class DiagGaussianHeadConfig:
 
 
 class DiagGaussianHead(nn.Module):
-    """Maps actor features to a diagonal Gaussian action distribution.
-
-    The mean is a linear function of the actor features (state-dependent,
-    learned); the standard deviation is a single learned vector shared
-    across every state (state-*independent* -- this matches the
-    original's design choice, and is the standard PPO continuous-control
-    convention: exploration noise doesn't need to itself depend on the
-    observation to work well in practice).
-    """
+    LOG_STD_MIN = -3.0
+    LOG_STD_MAX = 0.5
 
     def __init__(self, config: DiagGaussianHeadConfig) -> None:
         super().__init__()
         self.config = config
         self.mean_linear = nn.Linear(config.input_dim, config.action_dim)
-        # was: self.log_std = nn.Parameter(torch.zeros(config.action_dim))
         self.log_std = nn.Parameter(torch.full((config.action_dim,), -1.0))
 
     def forward(self, actor_features: Tensor) -> Independent:
-        """Return the action distribution for this tick.
-
-        Args:
-            actor_features: ``[..., input_dim]``.
-
-        Returns:
-            An ``Independent(Normal(...), 1)`` distribution over
-            ``[..., action_dim]`` actions. Supports ``.sample()``,
-            ``.log_prob(action)`` (already summed over the action
-            dimension), ``.entropy()`` (same), and ``.mean`` (the
-            distribution's mode, since a Gaussian's mean and mode
-            coincide -- used for deterministic action selection).
-
-        Raises:
-            ValueError: If ``actor_features``'s last dimension doesn't
-                match ``config.input_dim``.
-        """
         if actor_features.shape[-1] != self.config.input_dim:
             raise ValueError(
                 f"actor_features' last dim is {actor_features.shape[-1]}, "
@@ -96,7 +71,8 @@ class DiagGaussianHead(nn.Module):
                 f"{self.config.input_dim}."
             )
         mean = self.mean_linear(actor_features)
-        std = self.log_std.exp().expand_as(mean)
+        log_std = self.log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
+        std = log_std.exp().expand_as(mean)
         return Independent(Normal(mean, std), 1)
 
 

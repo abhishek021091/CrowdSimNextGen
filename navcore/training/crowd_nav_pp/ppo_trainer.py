@@ -25,6 +25,7 @@ Action log-prob convention:
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,12 +66,12 @@ class PPOConfig:
     """
 
     n_steps: int = 512
-    n_epochs: int = 8
+    n_epochs: int = 4
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_range: float = 0.2
+    clip_range: float = 0.15
     clip_range_vf: float | None = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.00
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     learning_rate: float = 3e-4
@@ -86,6 +87,23 @@ def _to_tensor_batch(
         k: torch.as_tensor(v, dtype=torch.float32, device=device)
         for k, v in obs.items()
     }
+
+
+def _explained_variance(y_pred: Tensor, y_true: Tensor) -> float:
+    """Fraction of return variance the value function explains.
+
+    1.0 is a perfect predictor, 0 is "no better than predicting the mean
+    return," negative is worse than that. Unlike value_loss alone, this
+    has a fixed scale that's comparable across runs/reward scales, so
+    it's the number to watch for "is the value head actually converging"
+    rather than "did the loss go down" (see overview.md's diagnosis of
+    the metrics_obstacles.csv run -- value_loss alone didn't distinguish
+    a value function chasing a moving target from one that's diverging).
+    """
+    var_y = torch.var(y_true)
+    if var_y.item() == 0.0:
+        return float("nan")
+    return float(1.0 - torch.var(y_true - y_pred) / var_y)
 
 
 class CrowdNavPPTrainer:
@@ -160,6 +178,24 @@ class CrowdNavPPTrainer:
 
     # -- rollout collection ---------------------------------------------------
 
+    @staticmethod
+    def _classify_outcome(info: dict) -> str:
+        """Classify one finished episode from its terminal-tick info dict.
+
+        Collision takes precedence when a tick satisfies more than one
+        ground-truth condition at once -- it's the task's actual failure
+        mode; goal-reach and out-of-bounds are checked after it, in that
+        order, since GoalReachingTask.reward() applies collision_penalty
+        unconditionally regardless of what else fired that tick.
+        """
+        if info.get("collision"):
+            return "collision"
+        if info.get("out_of_bounds"):
+            return "out_of_bounds"
+        if info.get("robot_reached_goal"):
+            return "success"
+        return "timeout"
+
     def collect_rollout(self) -> dict[str, float]:
         self.policy.eval()
         self.buffer.start(self._hidden_state)
@@ -168,7 +204,10 @@ class CrowdNavPPTrainer:
             self._obs = self.env.reset()
 
         episode_rewards: list[float] = []
+        episode_lengths: list[int] = []
+        outcomes = {"success": 0, "collision": 0, "out_of_bounds": 0, "timeout": 0}
         episode_reward = np.zeros(self.n_envs, dtype=np.float32)
+        episode_length = np.zeros(self.n_envs, dtype=np.int64)
         use_obstacle_encoder = self.policy.config.use_obstacle_encoder
 
         for _ in range(self.config.n_steps):
@@ -196,7 +235,7 @@ class CrowdNavPPTrainer:
                 )
 
             action_np = action_t.cpu().numpy().astype(np.float32)
-            next_obs, reward, done, _infos = self.env.step(action_np)
+            next_obs, reward, done, infos = self.env.step(action_np)
 
             self.buffer.add(
                 obs=self._obs,
@@ -209,16 +248,17 @@ class CrowdNavPPTrainer:
             )
 
             episode_reward += reward
+            episode_length += 1
             self.total_steps += self.n_envs
             self._hidden_state = new_hidden
             self._prev_done = done
 
             for env_idx in np.nonzero(done)[0]:
                 episode_rewards.append(float(episode_reward[env_idx]))
+                episode_lengths.append(int(episode_length[env_idx]))
+                outcomes[self._classify_outcome(infos[env_idx])] += 1
                 episode_reward[env_idx] = 0.0
-                # env's own self._hidden_state reset happens via
-                # not_done_mask on the *next* tick, not eagerly here --
-                # same two-phase deferral as the single-env version.
+                episode_length[env_idx] = 0
 
             self._obs = next_obs
 
@@ -248,12 +288,28 @@ class CrowdNavPPTrainer:
             gae_lambda=self.config.gae_lambda,
         )
 
-        return {
-            "episodes_completed": len(episode_rewards),
+        n_episodes = len(episode_rewards)
+        stats: dict[str, float] = {
+            "episodes_completed": n_episodes,
             "mean_episode_reward": (
-                float(np.mean(episode_rewards)) if episode_rewards else float("nan")
+                float(np.mean(episode_rewards)) if n_episodes else float("nan")
+            ),
+            "std_episode_reward": (
+                float(np.std(episode_rewards)) if n_episodes else float("nan")
+            ),
+            "min_episode_reward": (
+                float(np.min(episode_rewards)) if n_episodes else float("nan")
+            ),
+            "max_episode_reward": (
+                float(np.max(episode_rewards)) if n_episodes else float("nan")
+            ),
+            "mean_episode_length": (
+                float(np.mean(episode_lengths)) if n_episodes else float("nan")
             ),
         }
+        for name, count in outcomes.items():
+            stats[f"{name}_rate"] = count / n_episodes if n_episodes else float("nan")
+        return stats
 
     # -- PPO update -------------------------------------------------------------
 
@@ -309,6 +365,8 @@ class CrowdNavPPTrainer:
         old_log_probs = self.buffer.old_log_probs()
         old_values = self.buffer.old_values()
 
+        explained_var = _explained_variance(old_values, returns)
+
         if self.config.normalize_advantage:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -318,6 +376,7 @@ class CrowdNavPPTrainer:
             "entropy": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
+            "grad_norm": 0.0,
         }
 
         for _ in range(self.config.n_epochs):
@@ -354,7 +413,7 @@ class CrowdNavPPTrainer:
 
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.policy.parameters(), self.config.max_grad_norm
             )
             self.optimizer.step()
@@ -370,9 +429,20 @@ class CrowdNavPPTrainer:
             totals["entropy"] += entropy_loss.item()
             totals["approx_kl"] += approx_kl
             totals["clip_fraction"] += clip_fraction
+            totals["grad_norm"] += float(grad_norm)
 
         n = self.config.n_epochs
         stats = {k: v / n for k, v in totals.items()}
+        stats["explained_variance"] = explained_var
+        log_std_min = getattr(self.policy.action_head, "LOG_STD_MIN", -3.0)
+        log_std_max = getattr(self.policy.action_head, "LOG_STD_MAX", 0.5)
+        stats["action_std_mean"] = float(
+            self.policy.action_head.log_std.detach()
+            .clamp(log_std_min, log_std_max)
+            .exp()
+            .mean()
+            .item()
+        )
         self.total_updates += 1
         return stats
 
@@ -385,7 +455,7 @@ class CrowdNavPPTrainer:
         checkpoint_every: int | None = None,
         checkpoint_dir: str | None = None,
     ) -> None:
-        """Alternate collect/update until total_timesteps ticks are collected."""
+        start_time = time.time()
         while self.total_steps < total_timesteps:
             rollout_stats = self.collect_rollout()
             update_stats = self.update()
@@ -395,15 +465,37 @@ class CrowdNavPPTrainer:
                 )
 
             if self.total_updates % log_every == 0:
+                elapsed = time.time() - start_time
+                sps = self.total_steps / elapsed if elapsed > 0 else 0.0
                 print(
-                    f"update={self.total_updates} steps={self.total_steps} "
-                    f"episodes={rollout_stats['episodes_completed']} "
-                    f"mean_ep_reward={rollout_stats['mean_episode_reward']:.2f} "
-                    f"policy_loss={update_stats['policy_loss']:.4f} "
+                    f"update={self.total_updates} steps={self.total_steps}/{total_timesteps} "
+                    f"elapsed={elapsed:.0f}s sps={sps:.0f}"
+                )
+                print(
+                    f"  episodes={rollout_stats['episodes_completed']} "
+                    f"success={rollout_stats['success_rate']:.1%} "
+                    f"collision={rollout_stats['collision_rate']:.1%} "
+                    f"timeout={rollout_stats['timeout_rate']:.1%} "
+                    f"oob={rollout_stats['out_of_bounds_rate']:.1%}"
+                )
+                print(
+                    f"  reward: mean={rollout_stats['mean_episode_reward']:.2f} "
+                    f"std={rollout_stats['std_episode_reward']:.2f} "
+                    f"min={rollout_stats['min_episode_reward']:.2f} "
+                    f"max={rollout_stats['max_episode_reward']:.2f} "
+                    f"| ep_len mean={rollout_stats['mean_episode_length']:.1f}"
+                )
+                print(
+                    f"  policy_loss={update_stats['policy_loss']:.4f} "
                     f"value_loss={update_stats['value_loss']:.4f} "
                     f"entropy={update_stats['entropy']:.4f} "
                     f"approx_kl={update_stats['approx_kl']:.4f} "
                     f"clip_frac={update_stats['clip_fraction']:.3f}"
+                )
+                print(
+                    f"  explained_var={update_stats['explained_variance']:.3f} "
+                    f"grad_norm={update_stats['grad_norm']:.3f} "
+                    f"action_std={update_stats['action_std_mean']:.3f}"
                 )
 
             if (

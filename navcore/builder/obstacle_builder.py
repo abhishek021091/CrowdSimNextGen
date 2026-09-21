@@ -35,9 +35,11 @@ class ObstacleBuilder:
         self.obstacles: dict[str, Obstacle] = {}
 
     def build_boundary(self) -> None:
-        if self.config["boundary"]["gate"]["num_gates"] > 0:
-            gate_num = self.config["boundary"]["gate"]["num_gates"]
-            gates: list[BoundaryGate] = []
+        gate_config = self.config["boundary"]["gate"]
+        gates: list[BoundaryGate] = []
+
+        if gate_config.get("enabled", False) and gate_config["num_gates"] > 0:
+            gate_num = gate_config["num_gates"]
             edge_index = int(self.rand.choice([0, 1, 2, 3]))
             if edge_index == 0 or edge_index == 2:
                 offset: float = self.rand.uniform(
@@ -51,11 +53,13 @@ class ObstacleBuilder:
             for _ in range(gate_num):
                 gates.append(BoundaryGate(edge_index, offset, width))
 
-            w: float = self.env_config["arenaSize"]["width"] / 2
-            h: float = self.env_config["arenaSize"]["height"] / 2
-            edges = (Vector2(-w, -h), Vector2(w, -h), Vector2(w, h), Vector2(-w, h))
-            boundary_wall = Boundary(id="boundary", vertices=edges, gates=tuple(gates))
-            self.obstacles["boundary"] = boundary_wall.to_obstacle()
+        # Always build the boundary -- closed (no gates) is a valid, common
+        # case, not a reason to skip registering it as an obstacle.
+        w: float = self.env_config["arenaSize"]["width"] / 2
+        h: float = self.env_config["arenaSize"]["height"] / 2
+        edges = (Vector2(-w, -h), Vector2(w, -h), Vector2(w, h), Vector2(-w, h))
+        boundary_wall = Boundary(id="boundary", vertices=edges, gates=tuple(gates))
+        self.obstacles["boundary"] = boundary_wall.to_obstacle()
 
     def build_table(self) -> None:
         num__circular_tables = self.config["circular_table"]["num_tables"]

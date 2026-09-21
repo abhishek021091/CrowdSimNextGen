@@ -103,15 +103,29 @@ class RobotBuilder:
     def _inside_obstacle(point: Vector2, obstacles: dict[str, Obstacle] | None) -> bool:
         """Return whether `point` falls inside a non-traversable obstacle.
 
-        Traversable obstacles are skipped -- an agent may legally
-        occupy that space. No clearance margin is added for the
-        robot's own radius (see module docstring); `containment.py`
-        would need an inflated/Minkowski-sum test to support that for
-        `Polygon`, which it doesn't have yet.
+        The "boundary" entry (see ObstacleBuilder.build_boundary /
+        Boundary.to_obstacle) is excluded here on purpose. Its geometry is
+        the full interior polygon enclosed by the arena walls -- the
+        *allowed* region, not a forbidden one -- so testing it the same way
+        as a Table/Pillar rejects every point in the entire arena.
+        boustropheden.decompose() already excludes the same key for the
+        same reason (its own `interior_obstacles` filter), treating
+        "boundary" as the positive free-space region instead of a solid
+        obstacle. This mirrors that existing convention rather than
+        inventing a second way to recognize "this Obstacle actually denotes
+        the containing region, not a forbidden one."
+
+        Traversable obstacles are also skipped -- an agent may legally
+        occupy that space. No clearance margin is added for the robot's own
+        radius (see module docstring); `containment.py` would need an
+        inflated/Minkowski-sum test to support that for `Polygon`, which it
+        doesn't have yet.
         """
         if not obstacles:
             return False
-        for obstacle in obstacles.values():
+        for key, obstacle in obstacles.items():
+            if key == "boundary":
+                continue
             if obstacle.traversable:
                 continue
             if point_in_geometry(point, obstacle.geometry):

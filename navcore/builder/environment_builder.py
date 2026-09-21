@@ -36,6 +36,7 @@ class EnvironmentBuilder:
     def build_environment(self) -> Environment:
         if self.include_static_obstacles:
             self.obstacle_builder.build_table()
+            self.obstacle_builder.build_boundary()
         self.crowd_builder.build_crowd()
         self.crowd_builder.build_groups()
         self.robot_builder.build_robot(self.obstacle_builder.obstacles)
@@ -67,6 +68,7 @@ class EnvironmentBuilder:
         obstacle_builder = ObstacleBuilder(rand)
         if self.include_static_obstacles:
             obstacle_builder.build_table()
+            obstacle_builder.build_boundary()
         crowd_builder.build_crowd()
         crowd_builder.build_groups()
         robot_builder.build_robot(obstacle_builder.obstacles)

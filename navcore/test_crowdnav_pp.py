@@ -147,8 +147,16 @@ class CrowdNavPPLiveDemo:
             self._respawn_pedestrians(result)
             self.visualizer.refresh(self.env)
 
-            if result.robot_reached_goal or self.env.did_collision_happened():
-                status = "reached goal" if result.robot_reached_goal else "collided"
+            collided = self.env.did_collision_happened()
+            out_of_bounds = self.env.out_of_bounds()
+
+            if result.robot_reached_goal or collided or out_of_bounds:
+                if result.robot_reached_goal:
+                    status = "reached goal"
+                elif collided:
+                    status = "collided"
+                else:
+                    status = "left the arena bounds"
                 print(
                     f"Episode {self.episode_count}: robot {status} after "
                     f"{self.tick_count} ticks."

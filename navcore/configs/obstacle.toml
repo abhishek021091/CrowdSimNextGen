@@ -9,7 +9,7 @@ radius = 0.5
 randomize_radius = true
 
 [boundary]
-gate = { enabled = false, num_gates = 2 }
+gate = { enabled = false, num_gates = 0 }
 
 [rectangular_table]
 num_tables = 7
