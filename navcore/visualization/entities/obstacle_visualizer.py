@@ -16,7 +16,20 @@ class ObstacleVisualizer:
     # Draw obstacles
     def _draw_obstacles(self) -> None:
         obstacles = self.environment.obstacles
-        for obstacle in obstacles.values():
+        for key, obstacle in obstacles.items():
+            if key == "boundary":
+                if isinstance(obstacle.geometry, PolygonGeometry):
+                    vertices = [(v.x, v.y) for v in obstacle.geometry.vertices]
+                    self.ax.add_patch(
+                        Polygon(
+                            vertices,
+                            closed=True,
+                            fill=False,
+                            edgecolor="black",
+                            linewidth=2,
+                        )
+                    )
+                continue
             if isinstance(obstacle.geometry, CircleGeometry):
                 self.ax.add_patch(
                     Circle(

@@ -78,7 +78,8 @@ class RobotHumanAttentionConfig:
 
 
 class RobotHumanAttention(nn.Module):
-    """Single dot-product attention pass: robot embedding queries humans.
+    """Single dot-product attention pass: robot embedding queries humans
+    (and, optionally, a static-obstacle summary).
 
     Attributes:
         config: This layer's hyperparameters.
@@ -95,47 +96,60 @@ class RobotHumanAttention(nn.Module):
         robot_embedding: Tensor,
         human_embeddings: Tensor,
         visible_mask: Tensor,
+        obstacle_embedding: Tensor | None = None,
     ) -> Tensor:
-        """Return one crowd-context vector per robot, per (seq, env) slot.
+        """Return one crowd(+obstacle)-context vector per robot, per (seq, env) slot.
 
         Args:
             robot_embedding: ``[seq_len, nenv, 1, embedding_dim]`` -- the
-                robot's own embedding (e.g. the output of a robot-state
-                encoder analogous to the original's ``robot_linear``).
+                robot's own embedding.
             human_embeddings: ``[seq_len, nenv, max_human_num,
-                embedding_dim]`` -- per-human embeddings, e.g.
-                ``HumanHumanAttention``'s output (optionally projected
-                back down to ``embedding_dim`` first, if
-                ``HumanHumanAttention``'s ``embedding_size`` differs).
+                embedding_dim]`` -- per-human embeddings.
             visible_mask: ``[seq_len, nenv, max_human_num]`` boolean,
-                ``True`` for a real (non-padding) human slot -- same
-                convention as ``HumanHumanAttention.forward``.
+                ``True`` for a real (non-padding) human slot.
+            obstacle_embedding: Optional ``[seq_len, nenv, embedding_dim]``
+                -- a single per-(seq, env) summary of the robot's static
+                surroundings (e.g. ``ObstacleEncoder``'s pooled ray-scan
+                embedding, already projected to ``embedding_dim`` by the
+                caller). When given, it is appended as one extra,
+                always-visible key/value slot alongside the human
+                embeddings, so the same softmax that decides which
+                humans matter this tick also decides how much weight the
+                static-obstacle context deserves -- rather than obstacle
+                information reaching the policy through a separate,
+                unconditionally-added branch (``RecurrentNodeUpdate``
+                used to have one; it's been removed in favor of this).
+                ``None`` (the default) recovers the original human-only
+                behavior exactly: the temperature below is derived from
+                the human count alone, computed *before* this slot is
+                appended, so attaching an obstacle token never changes
+                attention sharpness for a fixed crowd.
 
         Returns:
-            ``[seq_len, nenv, embedding_dim]`` -- one crowd-context
-            vector per (seq, env) slot, ready to be concatenated with
-            the robot's own embedding before the recurrent node update
-            (a separate module, ported next).
+            ``[seq_len, nenv, embedding_dim]`` -- one context vector per
+            (seq, env) slot, blending whichever humans (and, if given,
+            the static-obstacle summary) the robot's query attends to.
 
         Raises:
             ValueError: If the inputs' shapes are inconsistent with each
-                other, or if any ``(seq, env)`` slot has zero visible
-                humans (see ``HumanHumanAttention`` for why this fails
-                loudly rather than propagating a ``NaN`` from a
-                fully-masked softmax row).
+                other or with ``obstacle_embedding``, or if any ``(seq,
+                env)`` slot has zero visible humans and no
+                ``obstacle_embedding`` was given to fall back on (see
+                ``HumanHumanAttention`` for why a fully-masked softmax
+                row is rejected rather than silently producing ``NaN``).
         """
-        seq_len, nenv, max_human_num, embedding_dim = human_embeddings.shape
+        seq_len, nenv, human_count, embedding_dim = human_embeddings.shape
         if tuple(robot_embedding.shape) != (seq_len, nenv, 1, embedding_dim):
             raise ValueError(
                 f"robot_embedding shape {tuple(robot_embedding.shape)} does "
                 f"not match expected {(seq_len, nenv, 1, embedding_dim)} "
                 f"(derived from human_embeddings)."
             )
-        if tuple(visible_mask.shape) != (seq_len, nenv, max_human_num):
+        if tuple(visible_mask.shape) != (seq_len, nenv, human_count):
             raise ValueError(
                 f"visible_mask shape {tuple(visible_mask.shape)} does not "
                 f"match human_embeddings' leading dims "
-                f"{(seq_len, nenv, max_human_num)}."
+                f"{(seq_len, nenv, human_count)}."
             )
         if embedding_dim != self.config.embedding_dim:
             raise ValueError(
@@ -143,38 +157,46 @@ class RobotHumanAttention(nn.Module):
                 f"was configured for embedding_dim={self.config.embedding_dim}."
             )
 
+        # See "Faithfulness note" above / in the module docstring: this
+        # scaling is tied to the human count specifically, computed
+        # before any obstacle slot is appended below.
+        temperature = human_count / (self.config.attention_size**0.5)
+
+        if obstacle_embedding is not None:
+            if tuple(obstacle_embedding.shape) != (seq_len, nenv, embedding_dim):
+                raise ValueError(
+                    f"obstacle_embedding shape "
+                    f"{tuple(obstacle_embedding.shape)} does not match "
+                    f"expected {(seq_len, nenv, embedding_dim)}."
+                )
+            human_embeddings = torch.cat(
+                (human_embeddings, obstacle_embedding.unsqueeze(2)), dim=2
+            )
+            visible_mask = torch.cat(
+                (visible_mask, visible_mask.new_ones(seq_len, nenv, 1)), dim=2
+            )
+
         fully_masked = visible_mask.sum(dim=-1) == 0
         if bool(fully_masked.any()):
             raise ValueError(
                 "visible_mask contains at least one (seq, env) slot with "
-                "zero visible humans -- softmax over zero unmasked humans "
-                "is undefined. See HumanHumanAttention's docstring for the "
-                "same open design question (synthetic dummy human vs. "
-                "caller-guaranteed non-empty crowd)."
+                "zero visible humans, and no obstacle_embedding was given "
+                "to fall back on -- softmax over zero unmasked keys is "
+                "undefined. Pass an obstacle_embedding, or see "
+                "HumanHumanAttention's docstring for the same open design "
+                "question (synthetic dummy human vs. caller-guaranteed "
+                "non-empty crowd)."
             )
 
         query = self.query_proj(robot_embedding)  # [seq_len, nenv, 1, attention_size]
-        key = self.key_proj(
-            human_embeddings
-        )  # [seq_len, nenv, max_human_num, attention_size]
+        key = self.key_proj(human_embeddings)  # [seq_len, nenv, slots, attention_size]
 
-        # Dot-product score per human: elementwise-multiply then sum over
-        # the attention_size dim, broadcasting the robot's single query
-        # against every human's key.
-        scores = (query * key).sum(dim=-1)  # [seq_len, nenv, max_human_num]
-
-        # See module docstring's "Faithfulness note" -- this is the
-        # original's actual (non-standard) scaling, kept intentionally.
-        temperature = max_human_num / (self.config.attention_size**0.5)
+        scores = (query * key).sum(dim=-1)  # [seq_len, nenv, slots]
         scores = scores * temperature
 
         scores = scores.masked_fill(~visible_mask, float("-inf"))
-        weights = torch.softmax(scores, dim=-1)  # [seq_len, nenv, max_human_num]
+        weights = torch.softmax(scores, dim=-1)  # [seq_len, nenv, slots]
 
-        # Weighted sum of human embeddings (not the attention_size-width
-        # keys) -- the context vector must stay in embedding_dim so it
-        # can be concatenated with the robot's own embedding_dim-wide
-        # embedding downstream.
         weighted = (weights.unsqueeze(-1) * human_embeddings).sum(dim=2)
 
         return weighted

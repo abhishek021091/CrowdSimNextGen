@@ -84,12 +84,38 @@ class RobotBuilder:
         )
 
     def generate_goal(self, obstacles: dict[str, Obstacle] | None = None) -> Goal:
+        """Sample a goal clear of every non-traversable obstacle *and* of
+        the arena boundary edge.
+
+        Obstacle clearance was already handled by `_inside_obstacle`, but
+        that check explicitly skips the "boundary" key (see its own
+        docstring -- boundary's Polygon is the allowed interior region,
+        not a forbidden footprint). That meant a goal could legally land
+        right up against the arena wall. `CollisionChecker` uses inverted
+        semantics for the boundary (solid on the *outside*, and also
+        flags any point within `robot.radius + safety_distance` of the
+        edge from the inside) -- so a wall-hugging goal could get the
+        robot flagged as colliding on the very tick it reaches its own
+        goal. Shrinking the sampling rectangle by that same clearance
+        up front prevents that case by construction, rather than
+        rejecting after the fact.
+        """
         width: float = self.env_config["arenaSize"]["width"]
         height: float = self.env_config["arenaSize"]["height"]
+        clearance = self._boundary_clearance()
+
+        half_width = width / 2 - clearance
+        half_height = height / 2 - clearance
+        if half_width <= 0.0 or half_height <= 0.0:
+            raise RuntimeError(
+                f"RobotBuilder.generate_goal(): arena is too small for the "
+                f"required boundary clearance ({clearance!r}) -- "
+                f"arenaSize={width}x{height}."
+            )
 
         for _ in range(self.MAX_PLACEMENT_ATTEMPTS):
-            gx: float = self.rand.uniform(-width / 2, width / 2)
-            gy: float = self.rand.uniform(-height / 2, height / 2)
+            gx: float = self.rand.uniform(-half_width, half_width)
+            gy: float = self.rand.uniform(-half_height, half_height)
             if not self._inside_obstacle(Vector2(gx, gy), obstacles):
                 return Goal(gx, gy)
 
@@ -98,6 +124,22 @@ class RobotBuilder:
             f"every obstacle after {self.MAX_PLACEMENT_ATTEMPTS} attempts -- "
             f"obstacle layout may cover too much of the arena."
         )
+
+    @staticmethod
+    def _boundary_clearance() -> float:
+        """Minimum distance a goal must be kept from the arena boundary edge.
+
+        `robot.radius + env.info.safety_distance` is exactly the margin
+        `CollisionChecker.check_collision` adds when testing a point
+        against the "boundary" obstacle -- see its `effective_radius`
+        computation. Read from the class-level configs directly (not an
+        instance's `self.robot`, which doesn't exist yet at the point
+        `generate_goal` is called from `build_robot`) since neither the
+        robot's radius nor the safety distance is ever randomized.
+        """
+        robot_radius = float(Robot.config["physical"]["radius"])
+        safety_distance = float(RobotBuilder.env_config["safety"]["distance"])
+        return robot_radius + safety_distance
 
     @staticmethod
     def _inside_obstacle(point: Vector2, obstacles: dict[str, Obstacle] | None) -> bool:

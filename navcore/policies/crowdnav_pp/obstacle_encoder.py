@@ -35,7 +35,7 @@ class ObstacleEncoderConfig:
 
     Attributes:
         ray_feature_dim: Width of one ray's feature vector. Defaults to
-            `RAY_FEATURE_DIM` (6).
+            `RAY_FEATURE_DIM` (3).
         embedding_dim: Dimensionality of the final output embedding.
         conv_channels: Number of channels for each of the 3 Conv1d layers.
         kernel_sizes: Kernel sizes for each of the 3 Conv1d layers.

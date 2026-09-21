@@ -36,6 +36,14 @@ leading-axis convention (unlike ``HumanHumanAttention``/
 single-step, so a ``seq_len`` axis has nothing to mean here. Callers
 operating on ``[seq_len, nenv, ...]`` tensors from the earlier pieces
 index/squeeze ``seq_len`` (always 1 at inference) before calling this.
+
+Static-obstacle context used to enter here as a third, unconditionally-
+added branch (``obstacle_embed``). It has moved upstream into
+``RobotHumanAttention`` instead: the obstacle summary is now one more
+key/value token the robot's query attends over, alongside humans, so the
+network learns *when* obstacle context matters rather than always
+receiving it at full strength. This class is back to its original
+two-branch (robot, crowd-context) GRU input.
 """
 
 from __future__ import annotations
@@ -52,7 +60,6 @@ class RecurrentNodeUpdateConfig:
     node_embedding_size: int = 64
     rnn_hidden_size: int = 128
     output_size: int = 256
-    use_obstacle_context: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -78,19 +85,9 @@ class RecurrentNodeUpdate(nn.Module):
         self.context_embed = nn.Sequential(
             nn.Linear(config.input_dim, config.node_embedding_size), nn.ReLU()
         )
-        # Obstacle context gets its own projection, not context_embed --
-        # crowd-context and obstacle-scan features are unrelated signals
-        # and have no business sharing one set of weights.
-        self.obstacle_embed: nn.Module | None = None
-        num_branches = 2
-        if config.use_obstacle_context:
-            self.obstacle_embed = nn.Sequential(
-                nn.Linear(config.input_dim, config.node_embedding_size), nn.ReLU()
-            )
-            num_branches = 3
 
         self.gru_cell = nn.GRUCell(
-            config.node_embedding_size * num_branches, config.rnn_hidden_size
+            config.node_embedding_size * 2, config.rnn_hidden_size
         )
         for name, param in self.gru_cell.named_parameters():
             if "bias" in name:
@@ -157,32 +154,10 @@ class RecurrentNodeUpdate(nn.Module):
                 f"match expected {(nenv,)}."
             )
 
-        if self.config.use_obstacle_context:
-            if obstacle_context is None:
-                raise ValueError(
-                    "This RecurrentNodeUpdate is configured with "
-                    "use_obstacle_context=True but forward() was called "
-                    "without obstacle_context."
-                )
-            if tuple(obstacle_context.shape) != (nenv, self.config.input_dim):
-                raise ValueError(
-                    f"obstacle_context shape {tuple(obstacle_context.shape)} "
-                    f"does not match expected {(nenv, self.config.input_dim)}."
-                )
-        elif obstacle_context is not None:
-            raise ValueError(
-                "obstacle_context was given but this RecurrentNodeUpdate was "
-                "configured with use_obstacle_context=False."
-            )
-
-        branches = [
-            self.robot_embed(robot_embedding),
-            self.context_embed(crowd_context),
-        ]
-        if obstacle_context is not None:
-            assert self.obstacle_embed is not None
-            branches.append(self.obstacle_embed(obstacle_context))
-        concat = torch.cat(branches, dim=-1)
+        concat = torch.cat(
+            (self.robot_embed(robot_embedding), self.context_embed(crowd_context)),
+            dim=-1,
+        )
 
         reset_hidden = hidden_state * not_done_mask.unsqueeze(-1)
         new_hidden = self.gru_cell(concat, reset_hidden)

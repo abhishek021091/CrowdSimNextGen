@@ -57,7 +57,6 @@ class HitType(IntEnum):
 
     NONE = 0
     OBSTACLE = 1
-    BOUNDARY = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,14 +109,14 @@ class ObstacleScan:
 
     hit_mask: np.ndarray
     hit_type: np.ndarray
-    distances: np.ndarray
+    # distances: np.ndarray
     relative_positions: np.ndarray
-    ray_angles: np.ndarray
+    # ray_angles: np.ndarray
 
 
 #: Per-ray feature layout produced by `scan_to_features`:
 #: [hit_mask, distance_norm, dx_norm, dy_norm, sin(ray_angle), cos(ray_angle)].
-RAY_FEATURE_DIM = 6
+RAY_FEATURE_DIM = 3
 
 
 def scan_to_features(scan: ObstacleScan, max_range: float) -> np.ndarray:
@@ -146,14 +145,14 @@ def scan_to_features(scan: ObstacleScan, max_range: float) -> np.ndarray:
     features = np.zeros((num_rays, RAY_FEATURE_DIM), dtype=np.float32)
 
     features[:, 0] = scan.hit_mask.astype(np.float32)
-    features[:, 1] = scan.distances / max_range
-    features[:, 2] = scan.relative_positions[:, 0] / max_range
-    features[:, 3] = scan.relative_positions[:, 1] / max_range
+    # features[:, 1] = scan.distances / max_range
+    features[:, 1] = scan.relative_positions[:, 0] / max_range
+    features[:, 2] = scan.relative_positions[:, 1] / max_range
 
     indices = np.arange(num_rays, dtype=np.float32)
     theta = 2.0 * np.pi * indices / num_rays
-    features[:, 4] = np.sin(theta)
-    features[:, 5] = np.cos(theta)
+    # features[:, 3] = np.sin(theta)
+    # features[:, 4] = np.cos(theta)
 
     return features
 
@@ -189,7 +188,7 @@ class ObstacleDetector:
         robot_x: float,
         robot_y: float,
         obstacles: list[BaseGeometry],
-        boundary: BaseGeometry | None = None,
+        # boundary: BaseGeometry | None = None,
         heading: float = 0.0,
     ) -> ObstacleScan:
         """Cast this scan's ray fan from (robot_x, robot_y).
@@ -240,13 +239,13 @@ class ObstacleDetector:
                 HitType.OBSTACLE if nearest_distance is not None else HitType.NONE
             )
 
-            if boundary is not None:
-                boundary_distance = _ray_geometry_distance(ray, boundary, origin)
-                if boundary_distance is not None and (
-                    nearest_distance is None or boundary_distance < nearest_distance
-                ):
-                    nearest_distance = boundary_distance
-                    nearest_type = HitType.BOUNDARY
+            # if boundary is not None:
+            #     boundary_distance = _ray_geometry_distance(ray, boundary, origin)
+            #     if boundary_distance is not None and (
+            #         nearest_distance is None or boundary_distance < nearest_distance
+            #     ):
+            #         nearest_distance = boundary_distance
+            #         nearest_type = HitType.BOUNDARY
 
             if nearest_distance is not None and nearest_distance <= max_range:
                 hit_mask[i] = True
@@ -258,9 +257,7 @@ class ObstacleDetector:
         return ObstacleScan(
             hit_mask=hit_mask,
             hit_type=hit_type,
-            distances=distances,
             relative_positions=relative_positions,
-            ray_angles=ray_angles,
         )
 
     @staticmethod

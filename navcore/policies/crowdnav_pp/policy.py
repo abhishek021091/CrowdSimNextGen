@@ -83,6 +83,7 @@ import torch
 from torch import Tensor, nn
 from torch.distributions import Independent
 
+from navcore.entities.components.sensors.obstacle_detector import RAY_FEATURE_DIM
 from navcore.policies.crowdnav_pp.actiton_distribution import (
     DiagGaussianHead,
     DiagGaussianHeadConfig,
@@ -96,7 +97,10 @@ from navcore.policies.crowdnav_pp.human_human_attention import (
     HumanHumanAttention,
     HumanHumanAttentionConfig,
 )
-from navcore.policies.crowdnav_pp.obstacle_encoder import ObstacleEncoder
+from navcore.policies.crowdnav_pp.obstacle_encoder import (
+    ObstacleEncoder,
+    ObstacleEncoderConfig,
+)
 from navcore.policies.crowdnav_pp.recurrent_node_update import (
     RecurrentNodeUpdate,
     RecurrentNodeUpdateConfig,
@@ -208,7 +212,6 @@ class CrowdNavPPPolicy(nn.Module):
         self,
         config: CrowdNavPPPolicyConfig,
         gst_predictor: GSTPredictor | None = None,
-        obstacle_encoder: ObstacleEncoder | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -219,24 +222,14 @@ class CrowdNavPPPolicy(nn.Module):
                 "(see GSTPredictorTrainer.load_predictor) -- GST is trained "
                 "separately, never jointly with this policy."
             )
-        if config.use_obstacle_encoder and obstacle_encoder is None:
-            raise ValueError(
-                "use_obstacle_encoder=True requires a pretrained obstacle_encoder "
-                "(see ObstacleEncoderTrainer.load_encoder) -- ObstacleEncoder is trained "
-                "separately, never jointly with this policy."
-            )
         self.gst_predictor = gst_predictor
-        self.obstacle_encoder = obstacle_encoder
-        self._obstacle_embed_down: nn.Module = nn.Identity()
-        if obstacle_encoder is not None:
-            self._obstacle_embed_down = (
-                nn.Identity()
-                if obstacle_encoder.config.output_dim
-                == config.interaction_embedding_dim
-                else nn.Linear(
-                    obstacle_encoder.config.output_dim, config.interaction_embedding_dim
-                )
+
+        self.obstacle_encoder = ObstacleEncoder(
+            ObstacleEncoderConfig(
+                ray_feature_dim=64,
+                embedding_dim=config.interaction_embedding_dim,
             )
+        )
         self.robot_encoder = RobotStateEncoder(
             RobotStateEncoderConfig(
                 robot_feature_dim=config.robot_feature_dim,
@@ -277,7 +270,6 @@ class CrowdNavPPPolicy(nn.Module):
                 node_embedding_size=config.node_embedding_size,
                 rnn_hidden_size=config.rnn_hidden_size,
                 output_size=config.node_output_size,
-                use_obstacle_context=config.use_obstacle_encoder,
             )
         )
         self.actor_critic_heads = ActorCriticHeads(
@@ -389,13 +381,7 @@ class CrowdNavPPPolicy(nn.Module):
         human_embeddings = self.human_human_attention(human_features, visible_mask)
         human_embeddings = self._human_embed_down(human_embeddings)
 
-        robot_embedding = self.robot_encoder(robot_features).unsqueeze(0).unsqueeze(-2)
-        crowd_context = self.robot_human_attention(
-            robot_embedding, human_embeddings, visible_mask
-        ).squeeze(0)
-        robot_embedding = robot_embedding.squeeze(0).squeeze(-2)
-
-        obstacle_context = None
+        obstacle_embedding_for_attention = None
         if self.config.use_obstacle_encoder:
             if ray_features is None:
                 raise ValueError(
@@ -403,19 +389,32 @@ class CrowdNavPPPolicy(nn.Module):
                     "called without ray_features."
                 )
             assert self.obstacle_encoder is not None
-            obstacle_embedding = self.obstacle_encoder(ray_features)
-            obstacle_context = self._obstacle_embed_down(obstacle_embedding)
+            raw_obstacle_embedding = self.obstacle_encoder(ray_features)
+            obstacle_context = self._obstacle_embed_down(raw_obstacle_embedding)
+            # RobotHumanAttention carries an explicit seq_len axis (see its
+            # own docstring); this policy is single-tick-only, so seq_len
+            # is always exactly 1 here -- matching human_features/
+            # visible_mask above.
+            obstacle_embedding_for_attention = obstacle_context.unsqueeze(0)
         elif ray_features is not None:
             raise ValueError(
                 "ray_features was given but config.use_obstacle_encoder=False."
             )
+
+        robot_embedding = self.robot_encoder(robot_features).unsqueeze(0).unsqueeze(-2)
+        crowd_context = self.robot_human_attention(
+            robot_embedding,
+            human_embeddings,
+            visible_mask,
+            obstacle_embedding=obstacle_embedding_for_attention,
+        ).squeeze(0)
+        robot_embedding = robot_embedding.squeeze(0).squeeze(-2)
 
         node_output, new_hidden_state = self.recurrent_update(
             robot_embedding,
             crowd_context,
             hidden_state,
             not_done_mask,
-            obstacle_context=obstacle_context,
         )
 
         value, actor_features = self.actor_critic_heads(node_output)
