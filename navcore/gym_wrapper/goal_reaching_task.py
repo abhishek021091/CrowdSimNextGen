@@ -71,13 +71,13 @@ class GoalReachingTask:
             reward += self.out_bound_penalty
         if self._reached_goal(env):
             reward += self.goal_bonus
-        if distance < 1.0:
-            print(
-                f"dist={distance:.3f}, "
-                f"progress={progress:.3f}, "
-                f"reward={reward:.3f}, "
-                f"goal={self._reached_goal(env)}"
-            )
+        # if distance < 1.0:
+        #     print(
+        #         f"dist={distance:.3f}, "
+        #         f"progress={progress:.3f}, "
+        #         f"reward={reward:.3f}, "
+        #         f"goal={self._reached_goal(env)}"
+        #     )
         return reward
 
     def is_terminated(

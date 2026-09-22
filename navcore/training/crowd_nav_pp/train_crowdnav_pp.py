@@ -20,7 +20,10 @@ from navcore.policies.crowdnav_pp.obstacle_encoder import (
     ObstacleEncoderConfig,
 )
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
-from navcore.training.crowd_nav_pp.ppo_trainer import CrowdNavPPTrainer, PPOConfig
+from navcore.training.crowd_nav_pp.crowd_nav_pp_trainer import (
+    CrowdNavPPTrainer,
+    PPOConfig,
+)
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 from navcore.training.gst_predictor.gst_predictor_trainer import GSTPredictorTrainer
 

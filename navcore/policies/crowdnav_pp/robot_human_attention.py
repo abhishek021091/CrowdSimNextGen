@@ -89,90 +89,56 @@ class RobotHumanAttention(nn.Module):
         human_embeddings: Tensor,
         visible_mask: Tensor,
         obstacle_embedding: Tensor | None = None,
+        obstacle_mask: Tensor | None = None,
     ) -> Tensor:
-        """Return one crowd(+obstacle)-context vector per robot, per (seq, env) slot.
-
+        """...
         Args:
-            robot_embedding: ``[seq_len, nenv, 1, embedding_dim]`` -- the
-                robot's own embedding.
-            human_embeddings: ``[seq_len, nenv, max_human_num,
-                embedding_dim]`` -- per-human embeddings.
-            visible_mask: ``[seq_len, nenv, max_human_num]`` boolean,
-                ``True`` for a real (non-padding) human slot.
-            obstacle_embedding: Optional ``[seq_len, nenv, embedding_dim]``
-                -- a single per-(seq, env) summary of the robot's static
-                surroundings (e.g. ``ObstacleEncoder``'s pooled ray-scan
-                embedding, already projected to ``embedding_dim`` by the
-                caller). When given, it is appended as one extra,
-                always-visible key/value slot alongside the human
-                embeddings, so the same softmax that decides which
-                humans matter this tick also decides how much weight the
-                static-obstacle context deserves -- rather than obstacle
-                information reaching the policy through a separate,
-                unconditionally-added branch (``RecurrentNodeUpdate``
-                used to have one; it's been removed in favor of this).
-                ``None`` (the default) recovers the original human-only
-                behavior exactly: the temperature below is derived from
-                the human count alone, computed *before* this slot is
-                appended, so attaching an obstacle token never changes
-                attention sharpness for a fixed crowd.
-
-        Returns:
-            ``[seq_len, nenv, embedding_dim]`` -- one context vector per
-            (seq, env) slot, blending whichever humans (and, if given,
-            the static-obstacle summary) the robot's query attends to.
-
-        Raises:
-            ValueError: If the inputs' shapes are inconsistent with each
-                other or with ``obstacle_embedding``, or if any ``(seq,
-                env)`` slot has zero visible humans and no
-                ``obstacle_embedding`` was given to fall back on (see
-                ``HumanHumanAttention`` for why a fully-masked softmax
-                row is rejected rather than silently producing ``NaN``).
+            ...
+            obstacle_embedding: Optional ``[seq_len, nenv, num_obstacle_tokens,
+                embedding_dim]`` -- one key/value token per ObstacleEncoder
+                ray (no longer a single pooled summary; pooling was removed
+                from ObstacleEncoder because it destroyed left/right
+                directional information even in an untrained encoder).
+                A ``[seq_len, nenv, embedding_dim]`` tensor (no token axis)
+                is still accepted for backward compatibility and treated as
+                one always-visible token.
+            obstacle_mask: Optional ``[seq_len, nenv, num_obstacle_tokens]``
+                boolean, True where that ray actually hit something. A ray
+                that hit nothing carries no real geometry and should not
+                compete for attention weight as a phantom "obstacle at the
+                robot" token -- omit only if every token should count as
+                visible (rare; prefer passing the real hit mask).
         """
         seq_len, nenv, human_count, embedding_dim = human_embeddings.shape
+
         if obstacle_embedding is not None:
-            if tuple(obstacle_embedding.shape) != (
-                seq_len,
-                nenv,
-                embedding_dim,
+            if obstacle_embedding.dim() == 3:
+                obstacle_embedding = obstacle_embedding.unsqueeze(2)
+
+            if (
+                obstacle_embedding.shape[:2] != (seq_len, nenv)
+                or obstacle_embedding.shape[-1] != embedding_dim
             ):
                 raise ValueError(
-                    f"obstacle_embedding shape "
-                    f"{tuple(obstacle_embedding.shape)} "
-                    f"does not match "
-                    f"{(seq_len, nenv, embedding_dim)}."
+                    f"obstacle_embedding shape {tuple(obstacle_embedding.shape)} "
+                    f"is not compatible with expected leading dims "
+                    f"{(seq_len, nenv)} and embedding_dim={embedding_dim}."
+                )
+            num_obstacle_tokens = obstacle_embedding.shape[2]
+
+            if obstacle_mask is None:
+                obstacle_mask = visible_mask.new_ones(
+                    seq_len, nenv, num_obstacle_tokens
+                )
+            elif tuple(obstacle_mask.shape) != (seq_len, nenv, num_obstacle_tokens):
+                raise ValueError(
+                    f"obstacle_mask shape {tuple(obstacle_mask.shape)} does not "
+                    f"match obstacle_embedding's token count "
+                    f"{(seq_len, nenv, num_obstacle_tokens)}."
                 )
 
-            human_embeddings = torch.cat(
-                (
-                    human_embeddings,
-                    obstacle_embedding.unsqueeze(2),
-                ),
-                dim=2,
-            )
-
-            visible_mask = torch.cat(
-                (
-                    visible_mask,
-                    visible_mask.new_ones(
-                        seq_len,
-                        nenv,
-                        1,
-                    ),
-                ),
-                dim=2,
-            )
-
-        if obstacle_embedding is not None:
-            # Concatenate obstacle as an additional key/value token
-            human_embeddings = torch.cat(
-                (human_embeddings, obstacle_embedding.unsqueeze(2)), dim=2
-            )
-            # Mark the obstacle as always visible
-            visible_mask = torch.cat(
-                (visible_mask, visible_mask.new_ones(seq_len, nenv, 1)), dim=2
-            )
+            human_embeddings = torch.cat((human_embeddings, obstacle_embedding), dim=2)
+            visible_mask = torch.cat((visible_mask, obstacle_mask), dim=2)
 
         slots = human_embeddings.shape[2]
         batch = seq_len * nenv

@@ -184,9 +184,14 @@ class CrowdNavPPTrainer:
     def _classify_outcome(info: dict) -> str:
         """Classify one finished episode from its terminal-tick info dict.
 
+        Free function (not a method) so evaluation code can reuse the exact
+        same precedence CrowdNavPPTrainer uses for rollout stats, instead of
+        re-deriving it and risking silent drift between training-time and
+        evaluation-time outcome definitions.
+
         Collision takes precedence when a tick satisfies more than one
         ground-truth condition at once -- it's the task's actual failure
-        mode; goal-reach and out-of-bounds are checked after it, in that
+        mode; out-of-bounds and goal-reach are checked after it, in that
         order, since GoalReachingTask.reward() applies collision_penalty
         unconditionally regardless of what else fired that tick.
         """
@@ -194,7 +199,7 @@ class CrowdNavPPTrainer:
             return "collision"
         if info.get("out_of_bounds"):
             return "out_of_bounds"
-        if info.get("robot_reached_goal"):
+        if info.get("terminated"):
             return "success"
         return "timeout"
 

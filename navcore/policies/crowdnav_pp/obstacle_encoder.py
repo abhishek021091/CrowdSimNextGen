@@ -118,8 +118,8 @@ class ObstacleEncoder(nn.Module):
                 padding_mode="circular",
             ),
             nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
+        )
+        self.project = nn.Sequential(
             nn.Linear(config.conv_channels[2], config.embedding_dim),
             nn.ReLU(),
         )
@@ -152,18 +152,14 @@ class ObstacleEncoder(nn.Module):
         for dim in leading:
             batch *= dim
 
-        # Reshape to [batch, num_rays, feature_dim]
         flat_batch = ray_features.reshape(batch, num_rays, feature_dim)
-
-        # Conv1d expects [batch, channels, length], so transpose the last two dims
-        # resulting in [batch, feature_dim, num_rays]
-        conv_input = flat_batch.transpose(1, 2)
-
-        # Forward pass through CNN
-        embedding = self.net(conv_input)
+        conv_input = flat_batch.transpose(1, 2)  # [batch, feat, num_rays]
+        conv_out = self.net(conv_input)  # [batch, channels, num_rays]
+        conv_out = conv_out.transpose(1, 2)  # [batch, num_rays, channels]
+        embedding = self.project(conv_out)
 
         # Reshape back to the original leading batch dimensions
-        return embedding.reshape(*leading, self.config.output_dim)
+        return embedding.reshape(*leading, num_rays, self.config.output_dim)
 
 
 def scan_to_features(scan: ObstacleScan, max_range: float) -> npt.NDArray[np.float32]:

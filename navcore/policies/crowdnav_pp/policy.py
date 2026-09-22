@@ -401,7 +401,7 @@ class CrowdNavPPPolicy(nn.Module):
         human_embeddings = self.human_human_attention(human_features, visible_mask)
         human_embeddings = self._human_embed_down(human_embeddings)
 
-        obstacle_embedding_for_attention = None
+        obstacle_mask_for_attention = None
         if self.config.use_obstacle_encoder:
             if ray_features is None:
                 raise ValueError(
@@ -409,13 +409,17 @@ class CrowdNavPPPolicy(nn.Module):
                     "called without ray_features."
                 )
             assert self.obstacle_encoder is not None
+            # [nenv, num_rays, output_dim] -- one token per ray now, not a
+            # single pooled summary (see ObstacleEncoder module docstring:
+            # pooling was confirmed via probe to destroy left/right
+            # directional info even untrained).
             raw_obstacle_embedding = self.obstacle_encoder(ray_features)
             obstacle_context = self._obstacle_embed_down(raw_obstacle_embedding)
-            # RobotHumanAttention carries an explicit seq_len axis (see its
-            # own docstring); this policy is single-tick-only, so seq_len
-            # is always exactly 1 here -- matching human_features/
-            # visible_mask above.
             obstacle_embedding_for_attention = obstacle_context.unsqueeze(0)
+            # ray_features[..., 0] is scan_to_features' hit_mask channel --
+            # mask out rays that hit nothing rather than feeding them in as
+            # phantom always-visible obstacle tokens.
+            obstacle_mask_for_attention = (ray_features[..., 0] > 0.5).unsqueeze(0)
         elif ray_features is not None:
             raise ValueError(
                 "ray_features was given but config.use_obstacle_encoder=False."
@@ -427,6 +431,7 @@ class CrowdNavPPPolicy(nn.Module):
             human_embeddings,
             visible_mask,
             obstacle_embedding=obstacle_embedding_for_attention,
+            obstacle_mask=obstacle_mask_for_attention,
         ).squeeze(0)
         robot_embedding = robot_embedding.squeeze(0).squeeze(-2)
 
