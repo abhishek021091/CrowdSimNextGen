@@ -85,3 +85,10 @@ class VecCrowdSimEnv:
     def _stack(obs_list: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
         keys = obs_list[0].keys()
         return {k: np.stack([o[k] for o in obs_list]) for k in keys}
+
+    def render(self) -> None:
+        """Route render call to the first sub-env with an active render_mode."""
+        for env in self.envs:
+            if getattr(env, "render_mode", None) is not None:
+                env.render()
+                break

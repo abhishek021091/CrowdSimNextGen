@@ -52,29 +52,18 @@ from torch import Tensor, nn
 
 @dataclass(slots=True, frozen=True)
 class RobotHumanAttentionConfig:
-    """Hyperparameters for :class:`RobotHumanAttention`.
-
-    Attributes:
-        embedding_dim: Width of both the robot's own embedding and each
-            human's embedding arriving at this layer -- they must match,
-            since the query/key projections below share this input
-            width. 256 in the original (``human_human_edge_rnn_size``).
-        attention_size: Width of the projection space attention scores
-            are computed in. 64 in the original.
-    """
-
     embedding_dim: int
-    attention_size: int = 64
+    num_attention_heads: int = 8
 
     def __post_init__(self) -> None:
         if self.embedding_dim <= 0:
             raise ValueError(
                 f"embedding_dim must be positive, got {self.embedding_dim!r}."
             )
-        if self.attention_size <= 0:
-            raise ValueError(
-                f"attention_size must be positive, got {self.attention_size!r}."
-            )
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if self.embedding_dim % self.num_attention_heads != 0:
+            raise ValueError("embedding_dim must be divisible by num_attention_heads.")
 
 
 class RobotHumanAttention(nn.Module):
@@ -85,11 +74,14 @@ class RobotHumanAttention(nn.Module):
         config: This layer's hyperparameters.
     """
 
-    def __init__(self, config: RobotHumanAttentionConfig) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
         self.config = config
-        self.query_proj = nn.Linear(config.embedding_dim, config.attention_size)
-        self.key_proj = nn.Linear(config.embedding_dim, config.attention_size)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=config.embedding_dim,
+            num_heads=config.num_attention_heads,
+            batch_first=True,
+        )
 
     def forward(
         self,
@@ -139,64 +131,62 @@ class RobotHumanAttention(nn.Module):
                 row is rejected rather than silently producing ``NaN``).
         """
         seq_len, nenv, human_count, embedding_dim = human_embeddings.shape
-        if tuple(robot_embedding.shape) != (seq_len, nenv, 1, embedding_dim):
-            raise ValueError(
-                f"robot_embedding shape {tuple(robot_embedding.shape)} does "
-                f"not match expected {(seq_len, nenv, 1, embedding_dim)} "
-                f"(derived from human_embeddings)."
-            )
-        if tuple(visible_mask.shape) != (seq_len, nenv, human_count):
-            raise ValueError(
-                f"visible_mask shape {tuple(visible_mask.shape)} does not "
-                f"match human_embeddings' leading dims "
-                f"{(seq_len, nenv, human_count)}."
-            )
-        if embedding_dim != self.config.embedding_dim:
-            raise ValueError(
-                f"Embeddings have width {embedding_dim}, but this layer "
-                f"was configured for embedding_dim={self.config.embedding_dim}."
-            )
-
-        # See "Faithfulness note" above / in the module docstring: this
-        # scaling is tied to the human count specifically, computed
-        # before any obstacle slot is appended below.
-        temperature = human_count / (self.config.attention_size**0.5)
-
         if obstacle_embedding is not None:
-            if tuple(obstacle_embedding.shape) != (seq_len, nenv, embedding_dim):
+            if tuple(obstacle_embedding.shape) != (
+                seq_len,
+                nenv,
+                embedding_dim,
+            ):
                 raise ValueError(
                     f"obstacle_embedding shape "
-                    f"{tuple(obstacle_embedding.shape)} does not match "
-                    f"expected {(seq_len, nenv, embedding_dim)}."
+                    f"{tuple(obstacle_embedding.shape)} "
+                    f"does not match "
+                    f"{(seq_len, nenv, embedding_dim)}."
                 )
+
+            human_embeddings = torch.cat(
+                (
+                    human_embeddings,
+                    obstacle_embedding.unsqueeze(2),
+                ),
+                dim=2,
+            )
+
+            visible_mask = torch.cat(
+                (
+                    visible_mask,
+                    visible_mask.new_ones(
+                        seq_len,
+                        nenv,
+                        1,
+                    ),
+                ),
+                dim=2,
+            )
+
+        if obstacle_embedding is not None:
+            # Concatenate obstacle as an additional key/value token
             human_embeddings = torch.cat(
                 (human_embeddings, obstacle_embedding.unsqueeze(2)), dim=2
             )
+            # Mark the obstacle as always visible
             visible_mask = torch.cat(
                 (visible_mask, visible_mask.new_ones(seq_len, nenv, 1)), dim=2
             )
 
-        fully_masked = visible_mask.sum(dim=-1) == 0
-        if bool(fully_masked.any()):
-            raise ValueError(
-                "visible_mask contains at least one (seq, env) slot with "
-                "zero visible humans, and no obstacle_embedding was given "
-                "to fall back on -- softmax over zero unmasked keys is "
-                "undefined. Pass an obstacle_embedding, or see "
-                "HumanHumanAttention's docstring for the same open design "
-                "question (synthetic dummy human vs. caller-guaranteed "
-                "non-empty crowd)."
-            )
+        slots = human_embeddings.shape[2]
+        batch = seq_len * nenv
 
-        query = self.query_proj(robot_embedding)  # [seq_len, nenv, 1, attention_size]
-        key = self.key_proj(human_embeddings)  # [seq_len, nenv, slots, attention_size]
+        query = robot_embedding.reshape(batch, 1, embedding_dim)
+        key = human_embeddings.reshape(batch, slots, embedding_dim)
+        mask = visible_mask.reshape(batch, slots)
 
-        scores = (query * key).sum(dim=-1)  # [seq_len, nenv, slots]
-        scores = scores * temperature
+        # Let standard MultiheadAttention handle projections and optimal scaling
+        context, _ = self.attention(
+            query=query,
+            key=key,
+            value=key,  # Key and Value share the same base tensor before internal projection
+            key_padding_mask=~mask,
+        )
 
-        scores = scores.masked_fill(~visible_mask, float("-inf"))
-        weights = torch.softmax(scores, dim=-1)  # [seq_len, nenv, slots]
-
-        weighted = (weights.unsqueeze(-1) * human_embeddings).sum(dim=2)
-
-        return weighted
+        return context.reshape(seq_len, nenv, embedding_dim)

@@ -152,7 +152,7 @@ class Step:
                     ]
                 ]
             )
-            <= self.env.info.goal_reach_tolerance
+            <= self.env.robot.radius + self.env.info.goal_reach_tolerance
         ):
             robot_reached_goal = True
         else:
@@ -162,7 +162,7 @@ class Step:
             assert ped.pose is not None and ped.goal is not None
             if (
                 np.linalg.norm([ped.pose.px - ped.goal.gx, ped.pose.py - ped.goal.gy])
-                <= self.env.info.goal_reach_tolerance
+                <= ped.radius + self.env.info.goal_reach_tolerance
             ):
                 pedestrian_reached_goals[ped.id] = True
             else:
@@ -203,7 +203,7 @@ class Step:
         crowd_velocities: dict[int, Velocity] = {}
 
         for ped_id, ped in self.env.crowd.items():
-            if self.rand.random() < 0.2:
+            if self.rand.random() < 0.01:
                 crowd_velocities[ped_id] = Velocity(0, 0)
                 continue
             assert ped.sensor is not None

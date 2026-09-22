@@ -59,6 +59,12 @@ def main() -> None:
     parser.add_argument("--use-gst-prediction", action="store_true", default=False)
     parser.add_argument("--gst-checkpoint", type=str, default=None)
     parser.add_argument("--metrics-path", type=str, default=None)
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        default=False,
+        help="Enable visualization for the first environment.",
+    )
     args = parser.parse_args()
 
     if args.use_gst_prediction and not args.gst_checkpoint:
@@ -77,11 +83,16 @@ def main() -> None:
     # (GoalReachingTask carries per-episode state -- see its reset()) -- so
     # build fresh factories, not shared objects.
     env_fns = [
-        (lambda: CrowdSimEnv(GoalReachingTask(), env_config))
-        for _ in range(args.n_envs)
+        (
+            lambda i=i: CrowdSimEnv(
+                GoalReachingTask(),
+                env_config,
+                render_mode="human" if args.render and i == 0 else None,
+            )
+        )
+        for i in range(args.n_envs)
     ]
     env = VecCrowdSimEnv(env_fns)
-
     gst_predictor = None
     if args.use_gst_prediction:
         gst_predictor = GSTPredictorTrainer.load_predictor(
@@ -118,7 +129,9 @@ def main() -> None:
         device=args.device,
     )
 
-    trainer = CrowdNavPPTrainer(env, policy, ppo_config, metrics_path=args.metrics_path)
+    trainer = CrowdNavPPTrainer(
+        env, policy, ppo_config, metrics_path=args.metrics_path, render=args.render
+    )
     if args.resume:
         trainer.load_checkpoint(args.resume)
 

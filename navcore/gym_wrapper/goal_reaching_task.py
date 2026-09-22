@@ -39,7 +39,7 @@ class GoalReachingTask:
         out_bound_penalty: float = -25.0,
         goal_bonus: float = 50.0,
         step_penalty: float = -0.01,
-        progress_weight: float = 2.0,
+        progress_weight: float = 5.0,
     ) -> None:
         self.collision_penalty = collision_penalty
         self.out_bound_penalty = out_bound_penalty
@@ -71,6 +71,13 @@ class GoalReachingTask:
             reward += self.out_bound_penalty
         if self._reached_goal(env):
             reward += self.goal_bonus
+        if distance < 1.0:
+            print(
+                f"dist={distance:.3f}, "
+                f"progress={progress:.3f}, "
+                f"reward={reward:.3f}, "
+                f"goal={self._reached_goal(env)}"
+            )
         return reward
 
     def is_terminated(
@@ -79,7 +86,10 @@ class GoalReachingTask:
         return self._reached_goal(env) or collided or out_of_bounds
 
     def _reached_goal(self, env: Environment) -> bool:
-        return self._distance_to_goal(env) <= env.info.goal_reach_tolerance
+        return (
+            self._distance_to_goal(env)
+            <= env.robot.radius + env.info.goal_reach_tolerance
+        )
 
     @staticmethod
     def _distance_to_goal(env: Environment) -> float:

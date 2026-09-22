@@ -124,6 +124,7 @@ class CrowdNavPPTrainer:
         policy: CrowdNavPPPolicy,
         config: PPOConfig | None = None,
         metrics_path: str | Path | None = None,
+        render: bool = False,
     ) -> None:
         from navcore.gym_wrapper.crowd_sim_env import ActionMode
 
@@ -150,6 +151,7 @@ class CrowdNavPPTrainer:
         self.policy = policy
         self.config = config or PPOConfig()
         self.device = torch.device(self.config.device)
+        self.render = render
 
         self.policy.to(self.device)
         self.optimizer = torch.optim.Adam(
@@ -236,6 +238,9 @@ class CrowdNavPPTrainer:
 
             action_np = action_t.cpu().numpy().astype(np.float32)
             next_obs, reward, done, infos = self.env.step(action_np)
+
+            if self.render:
+                self._render_env()
 
             self.buffer.add(
                 obs=self._obs,
@@ -453,6 +458,16 @@ class CrowdNavPPTrainer:
         )
         self.total_updates += 1
         return stats
+
+    def _render_env(self) -> None:
+        """Safely trigger rendering on the environment or its active sub-environment."""
+        if hasattr(self.env, "render"):
+            self.env.render()
+        elif hasattr(self.env, "envs"):
+            for sub_env in self.env.envs:
+                if getattr(sub_env, "render_mode", None) is not None:
+                    sub_env.render()
+                    break
 
     # -- top-level loop + checkpointing ----------------------------------------
 

@@ -43,6 +43,7 @@ from navcore.gym_wrapper.rl_missions import RLWaypointMission
 from navcore.gym_wrapper.task import Task
 from navcore.middleware.orca_middleware import DecentralizedORCAPlanner
 from navcore.step.step import Step
+from navcore.visualization.visualizer import Visualizer
 
 
 class ActionMode(Enum):
@@ -55,7 +56,7 @@ class CrowdSimEnvConfig:
     action_mode: ActionMode = ActionMode.VELOCITY
     max_neighbors: int = 10
     history_steps: int = 8
-    max_episode_steps: int = 5000
+    max_episode_steps: int = 1500
     robot_visible: bool = False
     include_static_obstacles: bool = True
     orca_config_file: str = "orca.toml"
@@ -73,12 +74,23 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
     stays task-agnostic.
     """
 
-    metadata: dict[str, Any] = {"render_modes": []}  # noqa: RUF012
+    metadata: dict[str, Any] = {
+        "render_modes": ["human", "rgb_array"],
+        "render_fps": 30,
+    }
 
-    def __init__(self, task: Task, config: CrowdSimEnvConfig | None = None) -> None:
+    def __init__(
+        self,
+        task: Task,
+        config: CrowdSimEnvConfig | None = None,
+        render_mode: str | None = None,
+    ) -> None:
         super().__init__()
         self.task = task
         self.config = config if config is not None else CrowdSimEnvConfig()
+
+        self.render_mode = render_mode
+        self.visualizer: Visualizer | None = None
 
         self._env_builder = EnvironmentBuilder(
             include_static_obstacles=self.config.include_static_obstacles
@@ -174,6 +186,10 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
 
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.config.max_episode_steps
+        # if truncated:
+        #     print(
+        #         f"Episode truncated after {self._elapsed_steps} steps (max_episode_steps={self.config.max_episode_steps})."
+        #     )
 
         info: dict[str, Any] = {
             "collision": collided,
@@ -182,6 +198,38 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
             "robot_reached_goal": step_result.robot_reached_goal,
         }
         return observation, reward, terminated, truncated, info
+
+    def _setup_visualizer(self) -> None:
+        """Instantiate the project's native visualizer."""
+        # Initialize the visualizer (pass self.env if your Visualizer requires it)
+        if self.visualizer is None:
+            self.visualizer = Visualizer()
+
+    def render(self) -> np.ndarray | None:
+        """Computes the render frames as specified by render_mode during init."""
+        if self.render_mode is None:
+            gym.logger.warn(
+                "You are calling render method without specifying any render mode."
+            )
+            return None
+
+        if self.visualizer is None:
+            self._setup_visualizer()
+
+        if self.render_mode == "human":
+            # Update the on-screen display
+            # self.visualizer.render(self.env)
+            pass
+        elif self.render_mode == "rgb_array":
+            # Return a numpy array of the frame
+            # return self.visualizer.get_rgb_array(self.env)
+            return np.zeros((480, 640, 3), dtype=np.uint8)  # Placeholder
+
+    def close(self) -> None:
+        """Clean up rendering resources."""
+        if self.visualizer is not None:
+            # self.visualizer.close()
+            self.visualizer = None
 
     def _apply_action(self, action: np.ndarray) -> None:
         if self.config.action_mode is ActionMode.VELOCITY:
@@ -229,7 +277,7 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
         distance = math.hypot(
             robot.goal.gx - robot.pose.px, robot.goal.gy - robot.pose.py
         )
-        return distance <= self.env.info.goal_reach_tolerance
+        return distance <= robot.radius + self.env.info.goal_reach_tolerance
 
     def _respawn_pedestrians(self, step_result) -> None:
         """Rebuild any pedestrian that reached its goal this tick with a

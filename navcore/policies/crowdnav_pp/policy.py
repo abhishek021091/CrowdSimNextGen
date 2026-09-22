@@ -175,6 +175,7 @@ class CrowdNavPPPolicyConfig:
     interaction_embedding_dim: int = 256
     human_human_embedding_size: int = 512
     human_human_num_heads: int = 8
+    robot_human_num_heads: int = 8
     robot_human_attention_size: int = 64
     node_embedding_size: int = 64
     rnn_hidden_size: int = 128
@@ -280,7 +281,7 @@ class CrowdNavPPPolicy(nn.Module):
         self.robot_human_attention = RobotHumanAttention(
             RobotHumanAttentionConfig(
                 embedding_dim=config.interaction_embedding_dim,
-                attention_size=config.robot_human_attention_size,
+                num_attention_heads=config.robot_human_num_heads,
             )
         )
         self.recurrent_update = RecurrentNodeUpdate(
