@@ -26,6 +26,17 @@ from navcore.policies.crowdnav_pp.obstacle_encoder import (
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.step.step import Step
 from navcore.visualization.visualizer import Visualizer
+import random
+import numpy as np
+import torch
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 
 CHECKPOINT_PATH = (
     "./navcore/training/crowd_nav_pp/checkpoints/run7/crowdnav_pp_step2400000.pt"

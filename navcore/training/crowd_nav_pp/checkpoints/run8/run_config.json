@@ -1,0 +1,33 @@
+{
+  "command": "/media/abhishek/New Volume/workspace/abhishek0209/CrowdSimNextGen/navcore/training/crowd_nav_pp/train_crowdnav_pp.py --n-envs 16 --total-timesteps 4960000 --checkpoint-dir ./navcore/training/crowd_nav_pp/checkpoints/run8 --checkpoint-every 20 --device cuda --n-steps 500 --metrics-path metrics_obstacles_run8.csv",
+  "args": {
+    "total_timesteps": 4960000,
+    "n_envs": 16,
+    "n_steps": 500,
+    "n_epochs": 4,
+    "learning_rate": 0.0003,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.15,
+    "clip_range_vf": 0.2,
+    "ent_coef": 0.0,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "no_grad_clip": false,
+    "max_neighbors": 10,
+    "history_steps": 5,
+    "max_episode_steps": 1500,
+    "use_obstacle_encoder": false,
+    "obstacle_num_rays": 60,
+    "obstacle_max_range": 5.0,
+    "seed": 15,
+    "device": "cuda",
+    "checkpoint_dir": "./navcore/training/crowd_nav_pp/checkpoints/run8",
+    "checkpoint_every": 20,
+    "resume": null,
+    "use_gst_prediction": false,
+    "gst_checkpoint": null,
+    "metrics_path": "metrics_obstacles_run8.csv",
+    "render": false
+  }
+}

@@ -125,6 +125,7 @@ class CrowdNavPPTrainer:
         config: PPOConfig | None = None,
         metrics_path: str | Path | None = None,
         render: bool = False,
+        seed: int | None = None,
     ) -> None:
         from navcore.gym_wrapper.crowd_sim_env import ActionMode
 
@@ -152,7 +153,7 @@ class CrowdNavPPTrainer:
         self.config = config or PPOConfig()
         self.device = torch.device(self.config.device)
         self.render = render
-
+        self._seed = seed
         self.policy.to(self.device)
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(), lr=self.config.learning_rate
@@ -208,14 +209,14 @@ class CrowdNavPPTrainer:
         self.buffer.start(self._hidden_state)
 
         if self._obs is None:
-            self._obs = self.env.reset()
+            self._obs = self.env.reset(self._seed)
 
         episode_rewards: list[float] = []
         episode_lengths: list[int] = []
         outcomes = {"success": 0, "collision": 0, "out_of_bounds": 0, "timeout": 0}
         episode_reward = np.zeros(self.n_envs, dtype=np.float32)
         episode_length = np.zeros(self.n_envs, dtype=np.int64)
-        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
+        use_range_image_obstacles = self.policy.config.use_range_image_obstacles
 
         for _ in range(self.config.n_steps):
             not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
@@ -225,9 +226,8 @@ class CrowdNavPPTrainer:
             )
 
             extra_kwargs = {}
-            if use_obstacle_encoder:
-                extra_kwargs["ray_features"] = obs_t["ray_features"]
-
+            if use_range_image_obstacles:
+                extra_kwargs["range_image"] = obs_t["range_image"]
             with torch.no_grad():
                 action_t, log_prob_t, value_t, new_hidden = self.policy.act(
                     obs_t["robot"],
@@ -279,8 +279,11 @@ class CrowdNavPPTrainer:
                 bootstrap_not_done_mask, dtype=torch.float32, device=self.device
             )
             extra_kwargs = {}
-            if use_obstacle_encoder:
-                extra_kwargs["ray_features"] = obs_t["ray_features"]
+            if (
+                use_range_image_obstacles
+                := self.policy.config.use_range_image_obstacles
+            ):
+                extra_kwargs["range_image"] = obs_t["range_image"]
             _, last_value_t, _ = self.policy.forward(
                 obs_t["robot"],
                 obs_t["neighbors"],
@@ -332,15 +335,15 @@ class CrowdNavPPTrainer:
         hidden = self.buffer.initial_hidden_state
         assert hidden is not None
 
-        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
+        use_range_image_obstacles = self.policy.config.use_range_image_obstacles
         log_probs: list[Tensor] = []
         values: list[Tensor] = []
         entropies: list[Tensor] = []
 
         for t in range(T):
             extra_kwargs = {}
-            if use_obstacle_encoder:
-                extra_kwargs["ray_features"] = obs["ray_features"][t]
+            if use_range_image_obstacles:
+                extra_kwargs["range_image"] = obs["range_image"][t]
             distribution, value, hidden = self.policy.forward(
                 obs["robot"][t],
                 obs["neighbors"][t],
@@ -543,6 +546,8 @@ class CrowdNavPPTrainer:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "total_steps": self.total_steps,
                 "total_updates": self.total_updates,
+                "ppo_config": self.config,  # PPOConfig dataclass
+                "policy_config": self.policy.config,  # CrowdNavPPPolicyConfig
             },
             path,
         )

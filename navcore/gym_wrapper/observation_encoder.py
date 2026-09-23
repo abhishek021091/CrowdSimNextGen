@@ -122,28 +122,34 @@ class ObservationEncoder:
         # ticks, across every parallel env, for geometry that never
         # changes between resets.
         self._cached_obstacle_polygons: list[ShapelyPolygon] = []
-        self._cached_boundary_ring: LinearRing | None = None
+        self._geometry_initialized: bool = False
 
     def reset(self, env: Environment | None = None) -> None:
         """Discard temporal state at an episode boundary.
 
         Args:
             env: The new episode's Environment. When given, also
-                refreshes the cached obstacle/boundary geometry used
-                for ray-casting. Callers that only need the
-                temporal-history reset (e.g. ``PolicyFieldVisualizer``,
-                which re-queries the same env's fixed obstacle layout
-                many times per call) may omit it -- the geometry cache
-                is left untouched.
+                refreshes the cached obstacle geometry used for
+                ray-casting. The environment's boundary ring is folded
+                into this same list as just one more piece of geometry a
+                ray can hit -- it is not tracked or treated separately
+                (see `ObstacleDetector.sense`'s docstring). Callers that
+                only need the temporal-history reset (e.g.
+                `PolicyFieldVisualizer`, which re-queries the same env's
+                fixed obstacle layout many times per call) may omit it --
+                the geometry cache is left untouched.
         """
         self._neighbor_history.clear()
         if env is not None:
-            self._cached_obstacle_polygons = [
+            obstacle_polygons = [
                 obstacle_to_shapely_polygon(obstacle)
                 for key, obstacle in env.obstacles.items()
                 if key != "boundary"
             ]
-            self._cached_boundary_ring = arena_boundary_ring(env)
+            self._cached_obstacle_polygons = obstacle_polygons + [
+                arena_boundary_ring(env)
+            ]
+            self._geometry_initialized = True
 
     @property
     def space(self) -> spaces.Dict:
@@ -192,7 +198,7 @@ class ObservationEncoder:
         if robot.sensor is None:
             raise RuntimeError("Robot sensor must be initialized before encoding.")
 
-        if self._cached_boundary_ring is None:
+        if not self._geometry_initialized:
             # Defensive fallback for a caller that never called
             # reset(env) -- normal CrowdSimEnv usage always does, so
             # this path shouldn't fire in the training loop.
@@ -246,7 +252,6 @@ class ObservationEncoder:
             robot_x,
             robot_y,
             self._cached_obstacle_polygons,
-            boundary=self._cached_boundary_ring,
             heading=0.0,
         )
         return self.range_image_builder.build(scan)

@@ -10,15 +10,19 @@ Run directly:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import random
+import sys
+from pathlib import Path
 
+import numpy as np
+import tomllib
 import torch
 
+import navcore.configs
 from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimEnvConfig
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
-from navcore.policies.crowdnav_pp.obstacle_encoder import (
-    ObstacleEncoder,
-    ObstacleEncoderConfig,
-)
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.crowd_nav_pp.crowd_nav_pp_trainer import (
     CrowdNavPPTrainer,
@@ -26,6 +30,21 @@ from navcore.training.crowd_nav_pp.crowd_nav_pp_trainer import (
 )
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 from navcore.training.gst_predictor.gst_predictor_trainer import GSTPredictorTrainer
+
+
+def _default_seed_from_toml() -> int:
+    """Fall back to env.toml's [random] seed when --seed isn't given."""
+    env_path = Path(navcore.configs.__file__).parent / "env.toml"
+    with open(env_path, "rb") as f:
+        config = tomllib.load(f)
+    return int(config["random"]["seed"])
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def main() -> None:
@@ -49,6 +68,7 @@ def main() -> None:
     parser.add_argument("--use-obstacle-encoder", action="store_true", default=False)
     parser.add_argument("--obstacle-num-rays", type=int, default=60)
     parser.add_argument("--obstacle-max-range", type=float, default=5.0)
+    parser.add_argument("--seed", type=int, default=_default_seed_from_toml())
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -69,6 +89,8 @@ def main() -> None:
         help="Enable visualization for the first environment.",
     )
     args = parser.parse_args()
+    log_run_config(args, args.checkpoint_dir)
+    set_seed(args.seed)
 
     if args.use_gst_prediction and not args.gst_checkpoint:
         parser.error("--use-gst-prediction requires --gst-checkpoint")
@@ -102,20 +124,16 @@ def main() -> None:
             args.gst_checkpoint, device=args.device
         )
 
-    obstacle_encoder = None
-    if args.use_obstacle_encoder:
-        obstacle_encoder = ObstacleEncoder(ObstacleEncoderConfig())
-
     # Defaults already match ObservationEncoder's actual feature widths
     # (robot_feature_dim=8, neighbor_feature_dim=5) -- see policy.py's
     # _NEIGHBOR_MOTION_SLICE comment for the same real coupling point.
     policy = CrowdNavPPPolicy(
         CrowdNavPPPolicyConfig(
             use_gst_prediction=args.use_gst_prediction,
-            use_obstacle_encoder=args.use_obstacle_encoder,
+            # use_obstacle_encoder=args.use_obstacle_encoder,
         ),
         gst_predictor=gst_predictor,
-        obstacle_encoder=obstacle_encoder,
+        # obstacle_encoder=obstacle_encoder,
     )
 
     ppo_config = PPOConfig(
@@ -133,7 +151,12 @@ def main() -> None:
     )
 
     trainer = CrowdNavPPTrainer(
-        env, policy, ppo_config, metrics_path=args.metrics_path, render=args.render
+        env,
+        policy,
+        ppo_config,
+        metrics_path=args.metrics_path,
+        render=args.render,
+        seed=args.seed,
     )
     if args.resume:
         trainer.load_checkpoint(args.resume)
@@ -143,6 +166,18 @@ def main() -> None:
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
     )
+
+
+def log_run_config(args, checkpoint_dir: str) -> None:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    record = {
+        "command": " ".join(sys.argv),
+        "args": vars(args),
+    }
+    config_path = os.path.join(checkpoint_dir, "run_config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, default=str)
+    print(f"Run config saved to {config_path}")
 
 
 if __name__ == "__main__":

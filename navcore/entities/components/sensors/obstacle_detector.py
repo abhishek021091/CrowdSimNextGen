@@ -54,6 +54,7 @@ Consolidation note (removes prior duplication):
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -67,7 +68,6 @@ class HitType(IntEnum):
 
     NONE = 0
     OBSTACLE = 1
-    BOUNDARY = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -202,30 +202,24 @@ class ObstacleDetector:
         self,
         robot_x: float,
         robot_y: float,
-        obstacles: list[BaseGeometry],
-        boundary: BaseGeometry | None = None,
+        obstacles: Sequence[BaseGeometry],
         heading: float = 0.0,
     ) -> ObstacleScan:
         """Cast this scan's ray fan from (robot_x, robot_y).
 
-        Each ray is tested against every entry in `obstacles` and, if
-        given, `boundary`; the nearest intersection overall (obstacle or
-        boundary) wins that ray and sets its `hit_type`.
+        Every entry in `obstacles` is tested identically and the nearest
+        intersection overall wins that ray. The environment boundary is
+        not special-cased here -- if the caller wants boundary detection,
+        it includes the boundary ring (e.g.
+        `navcore.entities.obstacles.geometry_conversion.arena_boundary_ring`)
+        as just another geometry in `obstacles`.
 
         Args:
             robot_x, robot_y: Robot position, world frame.
-            obstacles: Ground-truth obstacle geometries (e.g. env.obstacles,
-                excluding the boundary -- pass that separately via
-                `boundary` so hit_type can distinguish the two).
-            boundary: Ground-truth environment boundary geometry (walls /
-                free-space perimeter), or None to skip boundary detection
-                entirely (e.g. an unbounded environment). Must be a line
-                geometry (a Polygon's `.exterior`/`.boundary`, or a
-                LineString/MultiLineString of walls) -- passing a filled
-                Polygon means every ray "hits" it at distance 0 from
-                inside. See `navcore.entities.obstacles.geometry_conversion
-                .arena_boundary_ring` for the project's existing
-                world-frame boundary-ring builder.
+            obstacles: Ground-truth geometries a ray can hit -- static
+                obstacles, the arena boundary ring, or anything else the
+                caller wants rays to stop at. No entry is treated
+                differently from any other.
             heading: World-frame angle (radians) the ray fan is centered
                 on. Fixed at 0.0 for navcore's holonomic robot (see module
                 docstring's resolved open question #1).
@@ -251,21 +245,10 @@ class ObstacleDetector:
             ray = LineString([origin, (end_x, end_y)])
 
             nearest_distance = self._nearest_hit_distance(ray, obstacles, origin)
-            nearest_type = (
-                HitType.OBSTACLE if nearest_distance is not None else HitType.NONE
-            )
-
-            if boundary is not None:
-                boundary_distance = _ray_geometry_distance(ray, boundary, origin)
-                if boundary_distance is not None and (
-                    nearest_distance is None or boundary_distance < nearest_distance
-                ):
-                    nearest_distance = boundary_distance
-                    nearest_type = HitType.BOUNDARY
 
             if nearest_distance is not None and nearest_distance <= max_range:
                 hit_mask[i] = True
-                hit_type[i] = nearest_type
+                hit_type[i] = HitType.OBSTACLE
                 distances[i] = nearest_distance
                 relative_positions[i, 0] = nearest_distance * math.cos(angle)
                 relative_positions[i, 1] = nearest_distance * math.sin(angle)
@@ -281,7 +264,7 @@ class ObstacleDetector:
     @staticmethod
     def _nearest_hit_distance(
         ray: LineString,
-        obstacles: list[BaseGeometry],
+        obstacles: Sequence[BaseGeometry],
         origin: tuple[float, float],
     ) -> float | None:
         """Nearest intersection distance between `ray` and any of `obstacles`."""

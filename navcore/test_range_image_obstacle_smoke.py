@@ -93,9 +93,8 @@ def _test_range_image_builder():
 
     # No obstacles at all -> every ray effectively "hits" the sensing
     # boundary at max_range (ObstacleDetector's own no-hit default).
-    scan = detector.sense(0.0, 0.0, obstacles=[], boundary=None)
+    scan = detector.sense(0.0, 0.0, obstacles=[])
     image = builder.build(scan)
-
     assert image.shape == (1, 128, 180), f"unexpected shape {image.shape}"
     assert image.dtype == __import__("numpy").float32
     assert set(image.reshape(-1).tolist()) <= {0.0, 1.0}, "image must be binary"
