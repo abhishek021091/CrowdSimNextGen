@@ -1,13 +1,11 @@
 """CrowdNavPPPolicyConfig / CrowdNavPPPolicy: the assembled CrowdNav++ actor-critic.
 
-Wires together the seven modules ported from
+Wires together the modules ported from
 ``Shuijing725/CrowdNav_Prediction_AttnGraph`` (see each sibling module's own
-docstring for its individual porting rationale) into the single recurrent
-policy the paper describes: per-tick robot + neighbor features in, an
-action distribution + value estimate + updated recurrent hidden state out.
-This is the file that finally resolves the composition questions each of
-those modules deliberately left open for "whoever builds this piece" --
-see the three design-decision notes below.
+docstring for its individual porting rationale) into the recurrent policy
+the paper describes, PLUS a completely independent, from-scratch obstacle
+branch (see "Obstacle branch" below) that replaced the previous 1D-CNN-
+over-ray-features design.
 
 Design decision -- spatial_edge_feature_dim composition:
     ``HumanHumanAttention`` documents that its ``spatial_edge_feature_dim``
@@ -24,16 +22,18 @@ Design decision -- spatial_edge_feature_dim composition:
     "no live predictor yet" branch of that fork, by design.
 
 Design decision -- embedding-width unification:
-    ``RobotStateEncoder``, ``RobotHumanAttention``, and
-    ``RecurrentNodeUpdate.input_dim`` must all agree on one shared width
-    (the robot's own embedding and the crowd-context vector live in the
-    same space, per ``RecurrentNodeUpdate.forward``). ``HumanHumanAttention``'s
-    internal ``embedding_size`` is independent and, per its own
-    docstring, may need "projecting back down" before reaching
-    ``RobotHumanAttention`` -- this class owns that projection
-    (``self._human_embed_down``) rather than adding it inside either
-    attention module, since neither module should need to know about the
-    other's configured width.
+    ``RobotStateEncoder``, ``RobotHumanAttention``, ``RobotObstacleAttention``,
+    and ``RecurrentNodeUpdate.input_dim`` must all agree on one shared
+    width (256 by default, ``interaction_embedding_dim``) for the robot's
+    own embedding and every context vector fed into the GRU.
+    ``HumanHumanAttention``'s internal ``embedding_size`` is independent
+    and, per its own docstring, may need "projecting back down" before
+    reaching ``RobotHumanAttention`` -- this class owns that projection
+    (``self._human_embed_down``). The obstacle branch keeps its own,
+    separate 128-d latent space (``RangeImageEncoderConfig.
+    token_embedding_dim`` / ``RobotObstacleAttentionConfig.
+    obstacle_embedding_dim``) and is projected up to 256-d only *after*
+    ``RobotObstacleAttention`` runs -- see "Obstacle branch" below for why.
 
 Design decision -- the "zero visible humans" case:
     Both ``HumanHumanAttention`` and ``RobotHumanAttention`` raise loudly
@@ -44,10 +44,11 @@ Design decision -- the "zero visible humans" case:
     where real ``ObservationEncoder`` output enters the network: any
     environment currently seeing zero neighbors gets slot 0 forced
     visible before either attention layer runs (see
-    ``_substitute_dummy_human`` for the caveat this introduces).
-    Architecturally this is the only correct place for it -- doing it
-    inside the attention modules would force every caller, even ones
-    that can guarantee non-empty visibility another way, to pay for it.
+    ``_substitute_dummy_human`` for the caveat this introduces). The
+    obstacle branch has no equivalent case -- ``RangeImageEncoder``
+    always emits a fixed, geometrically meaningful set of tokens (every
+    angular sector is either free or blocked), so there is no "zero
+    obstacles visible" degenerate case to special-case.
 
 Recurrent-state convention:
     Matches ``RecurrentNodeUpdate``'s own convention (see its docstring):
@@ -58,32 +59,81 @@ Recurrent-state convention:
     its recurrent state carried, without this class knowing any of them
     exist (project's RL-framework-agnostic principle).
 
+====================================================================
+Obstacle branch (replaces the previous 1D-CNN-over-ray-features design)
+====================================================================
+
+Old design (removed, not merely modified):
+    Laser rays -> 1D CNN (``ObstacleEncoder``) -> pooled/per-ray obstacle
+    embedding -> concatenated into ``RobotHumanAttention`` as extra
+    key/value tokens alongside humans. ``RobotHumanAttention`` no longer
+    accepts any obstacle-related argument at all (see its own module
+    docstring) -- humans and obstacles must never share one attention
+    module again, since nothing about a human's identity/visibility/
+    motion history has anything in common with a ray-cast occupancy
+    sector's, and the previous sharing was an artifact of reusing
+    whatever attention module already existed, not a deliberate choice.
+
+New design, top to bottom:
+    1. ``navcore.entities.components.sensors.range_image.
+       RangeImageBuilder`` (sensor layer, not this file) converts one
+       tick's ``ObstacleScan`` into a binary, robot-centric range image
+       ``[1, H, W]``.
+    2. ``RangeImageEncoder`` (residual CNN, circular padding along the
+       angular/width axis, strided -- never pooled -- spatial
+       compression) turns that image into a fixed set of obstacle
+       tokens, each carrying a learned angular positional embedding:
+       ``[nenv, num_obstacle_tokens, obstacle_embedding_dim]`` (128-d
+       by default).
+    3. ``RobotObstacleAttention`` is a *completely independent* module
+       from ``RobotHumanAttention``: it projects the robot's 256-d
+       embedding down into the obstacle branch's own 128-d latent space
+       (``query_proj``) before using it as the attention query over the
+       obstacle tokens, producing a 128-d obstacle context vector. This
+       projection-before-query step, and keeping the whole branch at
+       128-d until after attention, is deliberate: the obstacle branch
+       should be free to develop its own representation without being
+       constrained to live in the human branch's 256-d space from the
+       start (this is why the up-projection to 256-d happens strictly
+       *after* ``RobotObstacleAttention``, not before it).
+    4. Both branches are independently normalized before fusion:
+       ``LayerNorm(human_context)`` and
+       ``LayerNorm(Linear(obstacle_context))`` (128 -> 256, then
+       LayerNorm).
+    5. ``ContextFusionGate`` computes a feature-wise (not scalar) sigmoid
+       gate from the concatenation of both normalized contexts and
+       blends them: ``fused = gate * human + (1 - gate) * obstacle``.
+       ``fused`` (not the raw human ``crowd_context``) is what
+       ``RecurrentNodeUpdate`` now receives as its ``crowd_context``
+       input -- the GRU itself is unchanged; only what feeds it changed.
+
 Not yet resolved here (flagged, not silently decided):
     - This class is single-tick-only (``seq_len`` is always 1 inside
       ``forward()``), mirroring ``RecurrentNodeUpdate``'s own
       inference-only scope -- see that module's docstring for why the
-      batched multi-timestep training path is deferred. A PPO training
-      loop built on this class needs its own batched forward path, once
-      that loop's rollout-storage layout is decided.
-    - No SB3/RLlib adapter yet. This module intentionally stops at "a
-      correct, testable ``nn.Module``" -- wiring it into a specific RL
-      framework's policy base class is a separate, framework-specific
-      decision.
-    - No shape/gradient smoke test yet, breaking from this project's
-      usual "each module is shape-tested before the next is built"
-      workflow -- this is the assembly step itself, so there was nothing
-      to test it against until now. Recommended immediate next step.
+      batched multi-timestep training path is deferred.
+    - The legacy 1D-CNN ``ObstacleEncoder``
+      (``navcore.policies.crowdnav_pp.obstacle_encoder``) is no longer
+      wired into this policy at all. The module file itself is left in
+      place (some standalone scripts/tests may still import it) but is
+      not part of the default architecture; see its own module docstring.
+    - Callers that used to pass ``ray_features``/``use_obstacle_encoder``
+      (``CrowdNavPPTrainer``, ``evaluate.py``, the live-demo/smoke-test
+      scripts) still need to be migrated to ``range_image``/
+      ``use_range_image_obstacles`` -- see this change's migration notes.
+      This is a mechanical rename plus threading a
+      ``RangeImageBuilder``-produced tensor through instead of
+      ``scan_to_features``'s output; not done in this pass.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor, nn
 from torch.distributions import Independent
 
-from navcore.entities.components.sensors.obstacle_detector import RAY_FEATURE_DIM
 from navcore.policies.crowdnav_pp.actiton_distribution import (
     DiagGaussianHead,
     DiagGaussianHeadConfig,
@@ -93,13 +143,14 @@ from navcore.policies.crowdnav_pp.actor_crititc_head import (
     ActorCriticHeads,
     ActorCriticHeadsConfig,
 )
+from navcore.policies.crowdnav_pp.fusion_gate import ContextFusionGate, FusionGateConfig
 from navcore.policies.crowdnav_pp.human_human_attention import (
     HumanHumanAttention,
     HumanHumanAttentionConfig,
 )
-from navcore.policies.crowdnav_pp.obstacle_encoder import (
-    ObstacleEncoder,
-    ObstacleEncoderConfig,
+from navcore.policies.crowdnav_pp.range_image_encoder import (
+    RangeImageEncoder,
+    RangeImageEncoderConfig,
 )
 from navcore.policies.crowdnav_pp.recurrent_node_update import (
     RecurrentNodeUpdate,
@@ -108,6 +159,10 @@ from navcore.policies.crowdnav_pp.recurrent_node_update import (
 from navcore.policies.crowdnav_pp.robot_human_attention import (
     RobotHumanAttention,
     RobotHumanAttentionConfig,
+)
+from navcore.policies.crowdnav_pp.robot_obstacle_attention import (
+    RobotObstacleAttention,
+    RobotObstacleAttentionConfig,
 )
 from navcore.policies.crowdnav_pp.robot_state_encoder import (
     RobotStateEncoder,
@@ -134,10 +189,13 @@ _NEIGHBOR_MOTION_SLICE = slice(2, 4)
 class CrowdNavPPPolicyConfig:
     """Hyperparameters for the assembled CrowdNav++ policy.
 
-    Every cross-module width is derived from a single shared field here
-    (see module docstring's "embedding-width unification") rather than
-    duplicated per sub-config, so there is no way for two sub-modules to
-    end up configured with mismatched widths.
+    Every cross-module width that both the human and obstacle branches
+    must agree on is derived from ``interaction_embedding_dim`` (see
+    module docstring's "embedding-width unification"); the obstacle
+    branch's own nested configs additionally cross-check themselves
+    against it and against each other in ``__post_init__`` below, so
+    there is no way for two sub-modules to end up configured with
+    mismatched widths.
 
     Attributes:
         robot_feature_dim: Width of ObservationEncoder's ``"robot"``
@@ -149,14 +207,15 @@ class CrowdNavPPPolicyConfig:
             embedding, concatenated onto its instantaneous features to
             form spatial_edge_feature_dim (see module docstring).
         interaction_embedding_dim: Shared embedding width for the
-            robot's own encoding, the robot-human attention output, and
+            robot's own encoding, the robot-human attention output, the
+            (projected) robot-obstacle attention output, and
             RecurrentNodeUpdate's input.
         human_human_embedding_size: HumanHumanAttention's internal
             embedding width (512 in the original paper).
         human_human_num_heads: HumanHumanAttention's attention head
             count. Must evenly divide human_human_embedding_size.
-        robot_human_attention_size: RobotHumanAttention's internal
-            projection width (64 in the original).
+        robot_human_num_heads: RobotHumanAttention's attention head
+            count. Must evenly divide interaction_embedding_dim.
         node_embedding_size: RecurrentNodeUpdate's per-input projection
             width before concatenation (64 in the original).
         rnn_hidden_size: RecurrentNodeUpdate's GRU hidden width (128 in
@@ -167,6 +226,24 @@ class CrowdNavPPPolicyConfig:
             and DiagGaussianHead's input width (256 in the original).
         action_dim: Number of continuous action dimensions (2 for
             navcore's (vx, vy) velocity action space).
+        use_gst_prediction: Whether to augment human-human attention
+            with a pretrained GSTPredictor's future-displacement
+            prediction -- unrelated to the obstacle branch.
+        gst_pred_length: See GSTPredictorConfig.pred_length.
+        use_range_image_obstacles: Whether the obstacle branch (range
+            image -> RangeImageEncoder -> RobotObstacleAttention ->
+            ContextFusionGate) is active. When False, ``forward()``
+            feeds the GRU the human branch's context directly, with no
+            obstacle awareness at all -- matching an obstacle-free
+            training config (e.g. ``include_static_obstacles=False``).
+        range_image_encoder: Nested config for ``RangeImageEncoder``.
+            Its ``token_embedding_dim`` must equal
+            ``robot_obstacle_attention.obstacle_embedding_dim``.
+        robot_obstacle_attention: Nested config for
+            ``RobotObstacleAttention``. Its ``robot_embedding_dim`` must
+            equal ``interaction_embedding_dim``.
+        fusion_gate: Nested config for ``ContextFusionGate``. Its
+            ``embedding_dim`` must equal ``interaction_embedding_dim``.
     """
 
     robot_feature_dim: int = 8
@@ -176,7 +253,6 @@ class CrowdNavPPPolicyConfig:
     human_human_embedding_size: int = 512
     human_human_num_heads: int = 8
     robot_human_num_heads: int = 8
-    robot_human_attention_size: int = 64
     node_embedding_size: int = 64
     rnn_hidden_size: int = 128
     node_output_size: int = 256
@@ -184,7 +260,44 @@ class CrowdNavPPPolicyConfig:
     action_dim: int = 2
     use_gst_prediction: bool = False
     gst_pred_length: int = 5
-    use_obstacle_encoder: bool = False
+
+    use_range_image_obstacles: bool = False
+    range_image_encoder: RangeImageEncoderConfig = field(
+        default_factory=RangeImageEncoderConfig
+    )
+    robot_obstacle_attention: RobotObstacleAttentionConfig = field(
+        default_factory=RobotObstacleAttentionConfig
+    )
+    fusion_gate: FusionGateConfig = field(default_factory=FusionGateConfig)
+
+    def __post_init__(self) -> None:
+        if not self.use_range_image_obstacles:
+            return
+        if self.robot_obstacle_attention.robot_embedding_dim != (
+            self.interaction_embedding_dim
+        ):
+            raise ValueError(
+                "robot_obstacle_attention.robot_embedding_dim "
+                f"({self.robot_obstacle_attention.robot_embedding_dim}) must "
+                f"equal interaction_embedding_dim "
+                f"({self.interaction_embedding_dim})."
+            )
+        if self.fusion_gate.embedding_dim != self.interaction_embedding_dim:
+            raise ValueError(
+                f"fusion_gate.embedding_dim ({self.fusion_gate.embedding_dim}) "
+                f"must equal interaction_embedding_dim "
+                f"({self.interaction_embedding_dim})."
+            )
+        if (
+            self.range_image_encoder.token_embedding_dim
+            != self.robot_obstacle_attention.obstacle_embedding_dim
+        ):
+            raise ValueError(
+                "range_image_encoder.token_embedding_dim "
+                f"({self.range_image_encoder.token_embedding_dim}) must equal "
+                "robot_obstacle_attention.obstacle_embedding_dim "
+                f"({self.robot_obstacle_attention.obstacle_embedding_dim})."
+            )
 
     @property
     def spatial_edge_feature_dim(self) -> int:
@@ -201,19 +314,26 @@ class CrowdNavPPPolicy(nn.Module):
     interface: pass in one tick's batched observation plus the previous
     recurrent hidden state, get back an action distribution, a value
     estimate, and the new hidden state. See module docstring for the
-    composition decisions this class resolves.
+    composition decisions this class resolves, and for the obstacle
+    branch's full design.
 
     Attributes:
         config: This policy's hyperparameters.
-        gst_predictor: A pretrained GSTPredictor for making future trajectory predictions.
-        obstacle_encoder: A pretrained ObstacleEncoder for encoding obstacle information.
+        gst_predictor: A pretrained GSTPredictor for making future
+            trajectory predictions (human branch only).
+        range_image_encoder: The obstacle branch's CNN, present only
+            when ``config.use_range_image_obstacles`` is True.
+        robot_obstacle_attention: The obstacle branch's attention
+            module, present only when
+            ``config.use_range_image_obstacles`` is True.
+        fusion_gate: Combines the human and obstacle contexts, present
+            only when ``config.use_range_image_obstacles`` is True.
     """
 
     def __init__(
         self,
         config: CrowdNavPPPolicyConfig,
         gst_predictor: GSTPredictor | None = None,
-        obstacle_encoder: ObstacleEncoder | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -225,30 +345,6 @@ class CrowdNavPPPolicy(nn.Module):
                 "separately, never jointly with this policy."
             )
         self.gst_predictor = gst_predictor
-
-        # Injected encoder wins (matches the gst_predictor pattern: built
-        # once, possibly pretrained, injected read-only). Only build a
-        # default when one is actually needed and none was given.
-        self.obstacle_encoder = obstacle_encoder
-        if self.obstacle_encoder is None and config.use_obstacle_encoder:
-            self.obstacle_encoder = ObstacleEncoder(
-                ObstacleEncoderConfig(
-                    ray_feature_dim=RAY_FEATURE_DIM,
-                    embedding_dim=config.interaction_embedding_dim,
-                )
-            )
-
-        # Down-project only if the encoder's output width doesn't already
-        # match interaction_embedding_dim -- the default-constructed
-        # encoder above is already built at that width, so this is a
-        # no-op (Identity) unless a caller injects a mismatched one.
-        self._obstacle_embed_down: nn.Module = nn.Identity()
-        if self.obstacle_encoder is not None:
-            obstacle_output_dim = self.obstacle_encoder.config.output_dim
-            if obstacle_output_dim != config.interaction_embedding_dim:
-                self._obstacle_embed_down = nn.Linear(
-                    obstacle_output_dim, config.interaction_embedding_dim
-                )
 
         self.robot_encoder = RobotStateEncoder(
             RobotStateEncoderConfig(
@@ -284,6 +380,30 @@ class CrowdNavPPPolicy(nn.Module):
                 num_attention_heads=config.robot_human_num_heads,
             )
         )
+        self.human_context_norm = nn.LayerNorm(config.interaction_embedding_dim)
+
+        # -- obstacle branch: independent of everything above except the
+        # shared robot embedding -- see module docstring.
+        self.range_image_encoder: RangeImageEncoder | None = None
+        self.robot_obstacle_attention: RobotObstacleAttention | None = None
+        self.obstacle_context_proj: nn.Module | None = None
+        self.obstacle_context_norm: nn.Module | None = None
+        self.fusion_gate: ContextFusionGate | None = None
+        if config.use_range_image_obstacles:
+            self.range_image_encoder = RangeImageEncoder(config.range_image_encoder)
+            self.robot_obstacle_attention = RobotObstacleAttention(
+                config.robot_obstacle_attention
+            )
+            # Projection happens strictly AFTER attention (128 -> 256),
+            # never before -- see module docstring's "own internal
+            # latent space" rationale.
+            self.obstacle_context_proj = nn.Linear(
+                config.robot_obstacle_attention.obstacle_embedding_dim,
+                config.interaction_embedding_dim,
+            )
+            self.obstacle_context_norm = nn.LayerNorm(config.interaction_embedding_dim)
+            self.fusion_gate = ContextFusionGate(config.fusion_gate)
+
         self.recurrent_update = RecurrentNodeUpdate(
             RecurrentNodeUpdateConfig(
                 input_dim=config.interaction_embedding_dim,
@@ -325,7 +445,7 @@ class CrowdNavPPPolicy(nn.Module):
         neighbor_history_mask: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
-        ray_features: Tensor | None = None,
+        range_image: Tensor | None = None,
     ) -> tuple[Independent, Tensor, Tensor]:
         """Run one recurrent tick for a batch of environments.
 
@@ -339,11 +459,6 @@ class CrowdNavPPPolicy(nn.Module):
                 stacked. Nonzero for a real (non-padding) neighbor.
             neighbor_history: ``[nenv, history_steps, max_neighbors,
                 neighbor_feature_dim]`` -- ``"neighbor_history"``, stacked.
-                Note the axis order: ObservationEncoder produces
-                history_steps first per environment; stacking across
-                environments puts nenv first instead. This method
-                transposes back to TemporalEncoder's expected
-                ``[history_steps, nenv, ...]`` order internally.
             neighbor_history_mask: ``[nenv, history_steps, max_neighbors]``
                 -- ``"neighbor_history_mask"``, stacked.
             hidden_state: ``[nenv, rnn_hidden_size]`` -- previous tick's
@@ -353,6 +468,12 @@ class CrowdNavPPPolicy(nn.Module):
                 forward, ``0.0`` to reset it (this tick starts a new
                 episode for that environment). Forwarded verbatim to
                 ``RecurrentNodeUpdate``.
+            range_image: ``[nenv, 1, H, W]`` -- ``"range_image"``, as
+                produced by
+                ``navcore.entities.components.sensors.range_image.
+                RangeImageBuilder`` and stacked across environments.
+                Required exactly when ``config.use_range_image_obstacles``
+                is True; must be omitted otherwise.
 
         Returns:
             ``(distribution, value, new_hidden_state)``: ``distribution``
@@ -360,7 +481,21 @@ class CrowdNavPPPolicy(nn.Module):
             1)``, from ``DiagGaussianHead``); ``value`` is ``[nenv, 1]``;
             ``new_hidden_state`` is ``[nenv, rnn_hidden_size]``, to be
             passed back in next tick.
+
+        Raises:
+            ValueError: If ``range_image`` is given but the obstacle
+                branch is disabled, or required but missing.
         """
+        if self.config.use_range_image_obstacles and range_image is None:
+            raise ValueError(
+                "config.use_range_image_obstacles=True but forward() was "
+                "called without range_image."
+            )
+        if not self.config.use_range_image_obstacles and range_image is not None:
+            raise ValueError(
+                "range_image was given but config.use_range_image_obstacles=False."
+            )
+
         neighbor_mask = neighbor_mask.bool()
         neighbor_history_mask = neighbor_history_mask.bool()
 
@@ -370,11 +505,6 @@ class CrowdNavPPPolicy(nn.Module):
 
         if self.config.use_gst_prediction:
             assert self.gst_predictor is not None
-            # neighbor_history[..., 0:2] is ObservationEncoder's rel_px/rel_py --
-            # robot-relative, which is sufficient for pairwise human-human
-            # geometry (see gst_predictor.py's module docstring). transpose(1, 2)
-            # swaps [nenv, history_steps, max_neighbors, ...] into GSTPredictor's
-            # expected [nenv, max_neighbors, history_steps, ...].
             hist_pos = neighbor_history[..., 0:2].transpose(1, 2)
             hist_vel = neighbor_history[..., 2:4].transpose(1, 2)
             hist_mask = neighbor_history_mask.transpose(1, 2)
@@ -401,43 +531,39 @@ class CrowdNavPPPolicy(nn.Module):
         human_embeddings = self.human_human_attention(human_features, visible_mask)
         human_embeddings = self._human_embed_down(human_embeddings)
 
-        obstacle_mask_for_attention = None
-        if self.config.use_obstacle_encoder:
-            if ray_features is None:
-                raise ValueError(
-                    "config.use_obstacle_encoder=True but forward() was "
-                    "called without ray_features."
-                )
-            assert self.obstacle_encoder is not None
-            # [nenv, num_rays, output_dim] -- one token per ray now, not a
-            # single pooled summary (see ObstacleEncoder module docstring:
-            # pooling was confirmed via probe to destroy left/right
-            # directional info even untrained).
-            raw_obstacle_embedding = self.obstacle_encoder(ray_features)
-            obstacle_context = self._obstacle_embed_down(raw_obstacle_embedding)
-            obstacle_embedding_for_attention = obstacle_context.unsqueeze(0)
-            # ray_features[..., 0] is scan_to_features' hit_mask channel --
-            # mask out rays that hit nothing rather than feeding them in as
-            # phantom always-visible obstacle tokens.
-            obstacle_mask_for_attention = (ray_features[..., 0] > 0.5).unsqueeze(0)
-        elif ray_features is not None:
-            raise ValueError(
-                "ray_features was given but config.use_obstacle_encoder=False."
-            )
-
-        robot_embedding = self.robot_encoder(robot_features).unsqueeze(0).unsqueeze(-2)
+        robot_embedding_seq = (
+            self.robot_encoder(robot_features).unsqueeze(0).unsqueeze(-2)
+        )  # [1, nenv, 1, D]
         crowd_context = self.robot_human_attention(
-            robot_embedding,
-            human_embeddings,
-            visible_mask,
-            obstacle_embedding=obstacle_embedding_for_attention,
-            obstacle_mask=obstacle_mask_for_attention,
-        ).squeeze(0)
-        robot_embedding = robot_embedding.squeeze(0).squeeze(-2)
+            robot_embedding_seq, human_embeddings, visible_mask
+        ).squeeze(0)  # [nenv, D]
+        robot_embedding = robot_embedding_seq.squeeze(0).squeeze(-2)  # [nenv, D]
+
+        human_context = self.human_context_norm(crowd_context)  # [nenv, D]
+
+        if self.config.use_range_image_obstacles:
+            assert (
+                self.range_image_encoder is not None
+                and self.robot_obstacle_attention is not None
+                and self.obstacle_context_proj is not None
+                and self.obstacle_context_norm is not None
+                and self.fusion_gate is not None
+                and range_image is not None
+            )
+            obstacle_tokens = self.range_image_encoder(range_image)
+            obstacle_context_raw = self.robot_obstacle_attention(
+                robot_embedding, obstacle_tokens
+            )  # [nenv, obstacle_embedding_dim]
+            obstacle_context = self.obstacle_context_norm(
+                self.obstacle_context_proj(obstacle_context_raw)
+            )  # [nenv, D]
+            fused_context = self.fusion_gate(human_context, obstacle_context)
+        else:
+            fused_context = human_context
 
         node_output, new_hidden_state = self.recurrent_update(
             robot_embedding,
-            crowd_context,
+            fused_context,
             hidden_state,
             not_done_mask,
         )
@@ -456,7 +582,7 @@ class CrowdNavPPPolicy(nn.Module):
         neighbor_history_mask: Tensor,
         hidden_state: Tensor,
         not_done_mask: Tensor,
-        ray_features: Tensor | None = None,
+        range_image: Tensor | None = None,
         deterministic: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Convenience wrapper: run ``forward`` and sample an action from it.
@@ -475,7 +601,7 @@ class CrowdNavPPPolicy(nn.Module):
             neighbor_history_mask,
             hidden_state,
             not_done_mask,
-            ray_features=ray_features,
+            range_image=range_image,
         )
         action, log_prob = select_action(distribution, deterministic=deterministic)
         return action, log_prob, value, new_hidden_state
@@ -487,17 +613,8 @@ class CrowdNavPPPolicy(nn.Module):
         See module docstring's "zero visible humans" design decision --
         this is the one place navcore implements the original paper's own
         documented workaround for a fully-masked attention row, rather
-        than letting either attention module crash on it.
-
-        Caveat, not silently hidden: the substituted slot's *feature*
-        vector is left exactly as ObservationEncoder already zero-fills
-        padding slots (relative position (0, 0), zero velocity, zero
-        radius, zero temporal embedding) -- i.e. the dummy human reads to
-        attention as "a human standing exactly on the robot." This is a
-        real placeholder artifact, not a neutral no-op; it is an
-        accepted approximation for now, worth revisiting if it shows up
-        in training diagnostics (e.g. an unexplained bias in learned
-        behavior for episodes with sparse crowds).
+        than letting either attention module crash on it. Obstacle-branch
+        equivalent: none needed (see module docstring).
 
         Args:
             visible_mask: ``[1, nenv, max_neighbors]``, boolean.

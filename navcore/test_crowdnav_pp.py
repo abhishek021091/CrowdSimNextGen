@@ -28,7 +28,7 @@ from navcore.step.step import Step
 from navcore.visualization.visualizer import Visualizer
 
 CHECKPOINT_PATH = (
-    "./navcore/training/crowd_nav_pp/checkpoints/run7/crowdnav_pp_step1600000.pt"
+    "./navcore/training/crowd_nav_pp/checkpoints/run7/crowdnav_pp_step2400000.pt"
 )
 
 

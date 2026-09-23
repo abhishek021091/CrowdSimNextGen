@@ -19,6 +19,23 @@ What this computes:
     CrowdNav++'s interaction graph; ``HumanHumanAttention`` (sibling
     module) is the first half.
 
+Humans only -- obstacles are a separate branch:
+    This module previously also accepted an optional static-obstacle
+    summary (``obstacle_embedding``/``obstacle_mask``), folded in as
+    extra key/value tokens alongside humans. That has been removed: the
+    obstacle branch is now ``RangeImageEncoder`` ->
+    ``RobotObstacleAttention`` (see
+    ``navcore.policies.crowdnav_pp.policy``'s module docstring), a
+    completely independent attention pass with its own query projection
+    and its own latent space, fused with this module's output only
+    afterward, via ``ContextFusionGate``. Humans and obstacles must
+    never again share one attention module -- a human's identity,
+    visibility, and motion history have nothing in common with a
+    ray-cast occupancy sector's, and letting them compete for the same
+    softmax was an artifact of the old 1D-CNN branch reusing whatever
+    attention module happened to already exist, not a deliberate
+    architectural choice.
+
 Naming deviation from the original, on purpose:
     The original calls its inputs ``h_temporal``/``h_spatials`` --
     leftover naming from the predecessor DS-RNN architecture
@@ -46,7 +63,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
 from torch import Tensor, nn
 
 
@@ -67,14 +83,13 @@ class RobotHumanAttentionConfig:
 
 
 class RobotHumanAttention(nn.Module):
-    """Single dot-product attention pass: robot embedding queries humans
-    (and, optionally, a static-obstacle summary).
+    """Single dot-product attention pass: robot embedding queries humans.
 
     Attributes:
         config: This layer's hyperparameters.
     """
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: RobotHumanAttentionConfig) -> None:
         super().__init__()
         self.config = config
         self.attention = nn.MultiheadAttention(
@@ -88,64 +103,31 @@ class RobotHumanAttention(nn.Module):
         robot_embedding: Tensor,
         human_embeddings: Tensor,
         visible_mask: Tensor,
-        obstacle_embedding: Tensor | None = None,
-        obstacle_mask: Tensor | None = None,
     ) -> Tensor:
-        """...
+        """Return the robot's crowd-context vector for this tick.
+
         Args:
-            ...
-            obstacle_embedding: Optional ``[seq_len, nenv, num_obstacle_tokens,
-                embedding_dim]`` -- one key/value token per ObstacleEncoder
-                ray (no longer a single pooled summary; pooling was removed
-                from ObstacleEncoder because it destroyed left/right
-                directional information even in an untrained encoder).
-                A ``[seq_len, nenv, embedding_dim]`` tensor (no token axis)
-                is still accepted for backward compatibility and treated as
-                one always-visible token.
-            obstacle_mask: Optional ``[seq_len, nenv, num_obstacle_tokens]``
-                boolean, True where that ray actually hit something. A ray
-                that hit nothing carries no real geometry and should not
-                compete for attention weight as a phantom "obstacle at the
-                robot" token -- omit only if every token should count as
-                visible (rare; prefer passing the real hit mask).
+            robot_embedding: ``[seq_len, nenv, 1, embedding_dim]`` --
+                the robot's own (already-projected) embedding, with a
+                singleton "1 robot" axis matching this layer's query
+                convention.
+            human_embeddings: ``[seq_len, nenv, human_count,
+                embedding_dim]`` -- every human slot's (already
+                human-human-attended) embedding, zero-padded past the
+                real visible-human count.
+            visible_mask: ``[seq_len, nenv, human_count]`` boolean,
+                ``True`` for a real (non-padding) human slot.
+
+        Returns:
+            ``[seq_len, nenv, embedding_dim]`` -- one crowd-context
+            vector per (seq, env).
         """
         seq_len, nenv, human_count, embedding_dim = human_embeddings.shape
-
-        if obstacle_embedding is not None:
-            if obstacle_embedding.dim() == 3:
-                obstacle_embedding = obstacle_embedding.unsqueeze(2)
-
-            if (
-                obstacle_embedding.shape[:2] != (seq_len, nenv)
-                or obstacle_embedding.shape[-1] != embedding_dim
-            ):
-                raise ValueError(
-                    f"obstacle_embedding shape {tuple(obstacle_embedding.shape)} "
-                    f"is not compatible with expected leading dims "
-                    f"{(seq_len, nenv)} and embedding_dim={embedding_dim}."
-                )
-            num_obstacle_tokens = obstacle_embedding.shape[2]
-
-            if obstacle_mask is None:
-                obstacle_mask = visible_mask.new_ones(
-                    seq_len, nenv, num_obstacle_tokens
-                )
-            elif tuple(obstacle_mask.shape) != (seq_len, nenv, num_obstacle_tokens):
-                raise ValueError(
-                    f"obstacle_mask shape {tuple(obstacle_mask.shape)} does not "
-                    f"match obstacle_embedding's token count "
-                    f"{(seq_len, nenv, num_obstacle_tokens)}."
-                )
-
-            human_embeddings = torch.cat((human_embeddings, obstacle_embedding), dim=2)
-            visible_mask = torch.cat((visible_mask, obstacle_mask), dim=2)
-
-        slots = human_embeddings.shape[2]
         batch = seq_len * nenv
 
         query = robot_embedding.reshape(batch, 1, embedding_dim)
-        key = human_embeddings.reshape(batch, slots, embedding_dim)
-        mask = visible_mask.reshape(batch, slots)
+        key = human_embeddings.reshape(batch, human_count, embedding_dim)
+        mask = visible_mask.reshape(batch, human_count)
 
         # Let standard MultiheadAttention handle projections and optimal scaling
         context, _ = self.attention(

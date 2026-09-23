@@ -1,6 +1,23 @@
 """ObservationEncoder: turns live Environment state into a fixed-shape
 Gymnasium observation for the robot.
-...
+
+Obstacle representation (changed):
+    Previously produced a `"ray_features"` key (a per-ray feature vector,
+    see `obstacle_detector.scan_to_features`), consumed by the now-legacy
+    1D-CNN `ObstacleEncoder`. This now produces a `"range_image"` key
+    instead -- a binary, robot-centric occupancy image built by
+    `navcore.entities.components.sensors.range_image.RangeImageBuilder` --
+    consumed by `RangeImageEncoder` (see `navcore.policies.crowdnav_pp.
+    policy`'s module docstring for the full obstacle-branch redesign).
+    The underlying ray-casting (`ObstacleDetector.sense`) is unchanged;
+    only what this class does with the resulting `ObstacleScan` differs.
+
+Boundary detection (restored):
+    `ObstacleDetector.sense` previously had its `boundary` parameter
+    commented out; callers (this class included) worked around that by
+    folding the boundary ring into the generic `obstacles` list, losing
+    the obstacle-vs-boundary distinction. This class now passes the
+    cached boundary ring via `sense`'s dedicated `boundary` argument.
 """
 
 from __future__ import annotations
@@ -15,10 +32,12 @@ from shapely.geometry import LinearRing
 from shapely.geometry import Polygon as ShapelyPolygon
 
 from navcore.entities.components.sensors.obstacle_detector import (
-    RAY_FEATURE_DIM,
     ObstacleDetector,
     ObstacleDetectorConfig,
-    scan_to_features,
+)
+from navcore.entities.components.sensors.range_image import (
+    RangeImageBuilder,
+    RangeImageBuilderConfig,
 )
 from navcore.entities.components.state import ObservableState
 from navcore.entities.environment.environment import Environment
@@ -36,10 +55,15 @@ class ObservationEncoder:
 
     Attributes:
         max_neighbors: Fixed neighbor-slot count.
-        obstacle_detector: Ray-casting sensor used to build
-            "ray_features". Stateless itself (see its own docstring);
-            this class owns the per-episode obstacle/boundary geometry
-            it's cast against.
+        obstacle_detector: Ray-casting sensor used to build the range
+            image. Stateless itself (see its own docstring); this class
+            owns the per-episode obstacle/boundary geometry it's cast
+            against.
+        range_image_builder: Converts each tick's raw scan into the
+            binary occupancy image `RangeImageEncoder` consumes. Its
+            `num_rays`/`max_range` are kept in sync with
+            `obstacle_detector.config` at construction time -- see
+            `__init__`.
     """
 
     def __init__(
@@ -47,6 +71,7 @@ class ObservationEncoder:
         max_neighbors: int,
         history_steps: int = 8,
         obstacle_detector_config: ObstacleDetectorConfig | None = None,
+        range_image_builder_config: RangeImageBuilderConfig | None = None,
     ) -> None:
         if max_neighbors <= 0:
             raise ValueError(f"max_neighbors must be positive, got {max_neighbors!r}.")
@@ -57,6 +82,37 @@ class ObservationEncoder:
         self._neighbor_history: dict[int, deque[np.ndarray]] = {}
 
         self.obstacle_detector = ObstacleDetector(obstacle_detector_config)
+
+        if range_image_builder_config is not None:
+            if (
+                range_image_builder_config.num_rays
+                != self.obstacle_detector.config.num_rays
+            ):
+                raise ValueError(
+                    "range_image_builder_config.num_rays "
+                    f"({range_image_builder_config.num_rays}) must match "
+                    "obstacle_detector_config.num_rays "
+                    f"({self.obstacle_detector.config.num_rays})."
+                )
+            if (
+                range_image_builder_config.max_range
+                != self.obstacle_detector.config.max_range
+            ):
+                raise ValueError(
+                    "range_image_builder_config.max_range "
+                    f"({range_image_builder_config.max_range}) must match "
+                    "obstacle_detector_config.max_range "
+                    f"({self.obstacle_detector.config.max_range})."
+                )
+            self.range_image_builder = RangeImageBuilder(range_image_builder_config)
+        else:
+            self.range_image_builder = RangeImageBuilder(
+                RangeImageBuilderConfig(
+                    num_rays=self.obstacle_detector.config.num_rays,
+                    max_range=self.obstacle_detector.config.max_range,
+                )
+            )
+
         # Static per-episode obstacle/boundary geometry, in world-frame
         # shapely form -- built once per episode (see reset()), not
         # every encode() call. Obstacles are static within an episode
@@ -92,6 +148,7 @@ class ObservationEncoder:
     @property
     def space(self) -> spaces.Dict:
         inf = np.float32(np.inf)
+        builder_config = self.range_image_builder.config
         return spaces.Dict(
             {
                 "robot": spaces.Box(
@@ -117,10 +174,10 @@ class ObservationEncoder:
                 "neighbor_history_mask": spaces.MultiBinary(
                     (self.history_steps, self.max_neighbors)
                 ),
-                "ray_features": spaces.Box(
-                    -inf,
-                    inf,
-                    shape=(self.obstacle_detector.config.num_rays, RAY_FEATURE_DIM),
+                "range_image": spaces.Box(
+                    0.0,
+                    1.0,
+                    shape=(1, builder_config.num_range_bins, builder_config.num_rays),
                     dtype=np.float32,
                 ),
             }
@@ -160,7 +217,7 @@ class ObservationEncoder:
         neighbors, mask, history, history_mask = self._encode_neighbors(
             robot.pose.px, robot.pose.py, neighbor_obs
         )
-        ray_features = self._encode_ray_features(robot.pose.px, robot.pose.py)
+        range_image = self._encode_range_image(robot.pose.px, robot.pose.py)
 
         return {
             "robot": robot_features,
@@ -168,33 +225,32 @@ class ObservationEncoder:
             "neighbor_mask": mask,
             "neighbor_history": history,
             "neighbor_history_mask": history_mask,
-            "ray_features": ray_features,
+            "range_image": range_image,
         }
 
-    def _encode_ray_features(
+    def _encode_range_image(
         self, robot_x: float, robot_y: float
     ) -> npt.NDArray[np.float32]:
-        """Cast this tick's ray fan and convert it to CNN-ready features.
+        """Cast this tick's ray fan and convert it to a binary range image.
 
         heading fixed at 0.0 -- world-frame ray fan, not
-        robot-heading-relative. Resolves ObstacleDetector's own open
-        question #1: the robot is holonomic (robot.toml's
+        robot-heading-relative. The robot is holonomic (robot.toml's
         `chassis = "holonomic"`), so there's no orientation-constrained
-        motion a heading-relative fan needs to track, and
-        `scan_to_features()` independently assumes ray 0 sits at angle
-        0 -- consistent with heading=0.0, silently wrong otherwise. Do
-        not change this without also fixing `scan_to_features()` to
-        read `scan.ray_angles`.
+        motion a heading-relative fan needs to track (see
+        `ObstacleDetector`'s module docstring, resolved open question
+        #1). Obstacles and the boundary are passed separately (rather
+        than folded into one list) so `ObstacleScan.hit_type` correctly
+        distinguishes them -- see this module's docstring.
         """
         scan = self.obstacle_detector.sense(
             robot_x,
             robot_y,
-            [*self._cached_obstacle_polygons, self._cached_boundary_ring],
+            self._cached_obstacle_polygons,
+            boundary=self._cached_boundary_ring,
             heading=0.0,
         )
-        return scan_to_features(scan, self.obstacle_detector.config.max_range)
+        return self.range_image_builder.build(scan)
 
-    # _encode_neighbors() and _neighbor_features() unchanged
     def _encode_neighbors(
         self,
         robot_x: float,

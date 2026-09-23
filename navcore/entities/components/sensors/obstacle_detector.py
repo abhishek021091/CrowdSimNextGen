@@ -19,26 +19,36 @@ project's existing split between ground-truth-only consumers
 (collision_detector/) and planner-visible state (see overview.md:
 "Ground-truth state is reserved for collision detection only").
 
-OPEN DESIGN QUESTIONS (unresolved -- confirm before wiring into
-ObservationEncoder/CrowdSimEnv):
+RESTORED (previously commented out -- see RangeImageBuilder, which is now
+the canonical consumer of this module's output):
+    - `ObstacleScan.distances` / `ObstacleScan.ray_angles`: needed by
+      `RangeImageBuilder` to bin each ray into a range image row, and to
+      recover absolute bearing without re-deriving the ray fan.
+    - `HitType.BOUNDARY` and `sense()`'s `boundary` parameter: previously
+      `ObservationEncoder` worked around this by folding the boundary ring
+      into the generic `obstacles` list, which loses the obstacle-vs-
+      boundary distinction entirely. `sense()` now tests `boundary`
+      explicitly, same as any other geometry, and reports which one a ray
+      actually hit.
+
+RESOLVED (previously open design questions):
     1. Ray angles are generated in the WORLD frame, evenly spaced over
-       `fov_radians`, centered on a `heading` argument that defaults to
-       0.0. I don't have visibility into the actual Robot/Pose classes in
-       this repo, so I don't know whether the robot carries a meaningful
-       orientation (VELOCITY action mode suggests a holonomic robot with
-       no heading, in which case a fixed world-frame ray fan is probably
-       right) or whether sensor rays should be robot-heading-relative.
-    2. `boundary` is accepted as a single Shapely geometry (a Polygon's
-       exterior ring, or a LineString/MultiLineString of walls) -- I don't
-       know how the environment boundary is actually represented elsewhere
-       in navcore (EnvironmentBuilder is the likely owner). If it's stored
-       as a filled Polygon rather than its boundary line, pass
-       `polygon.exterior` (or `polygon.boundary`) in, not the polygon
-       itself, or every ray originating inside it will register a
-       same-point "hit" at distance 0.
-    Everything here is written against plain floats/geometries, not the
-    Robot/Pose/Environment types, so swapping in the real attributes at the
-    call site shouldn't require changing this module.
+       `fov_radians`, centered on `heading` (default 0.0). Confirmed
+       correct for navcore's holonomic robot (see
+       `ObservationEncoder._encode_range_image`): there is no orientation-
+       constrained motion a heading-relative fan would need to track.
+    2. `boundary` is accepted as a single Shapely line geometry (a
+       Polygon's `.exterior`/`.boundary`, or a LineString/MultiLineString
+       of walls) -- callers pass `env`'s boundary ring, not a filled
+       Polygon (see `navcore.entities.obstacles.geometry_conversion.
+       arena_boundary_ring`), so a ray originating inside it does not
+       register a spurious same-point hit at distance 0.
+
+Consolidation note (removes prior duplication):
+    A second, divergent `scan_to_features`/`RAY_FEATURE_DIM` used to live
+    in `navcore.policies.crowdnav_pp.obstacle_encoder` (the now-legacy
+    1D-CNN obstacle branch). That module now imports this one instead of
+    keeping its own copy -- see its module docstring.
 """
 
 from __future__ import annotations
@@ -48,8 +58,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 import numpy as np
-from shapely.geometry.base import BaseGeometry
 from shapely.geometry import LineString
+from shapely.geometry.base import BaseGeometry
 
 
 class HitType(IntEnum):
@@ -57,6 +67,7 @@ class HitType(IntEnum):
 
     NONE = 0
     OBSTACLE = 1
+    BOUNDARY = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,29 +75,42 @@ class ObstacleDetectorConfig:
     """Ray-casting sensor parameters.
 
     Attributes:
-        num_rays: Number of evenly spaced rays per scan.
+        num_rays: Number of evenly spaced rays per scan. Defaults to 180
+            to match `RangeImageBuilderConfig`'s default image width --
+            keep the two in sync when either is overridden.
         max_range: Ray length in meters. A ray that hits nothing reports
-            this as its distance and is marked invalid in `hit_mask`.
+            this as its distance and is marked invalid in `hit_mask` --
+            this is also exactly what `RangeImageBuilder` treats as "the
+            sensing-square boundary itself is the first hit" (see that
+            module's docstring).
         fov_radians: Angular spread of the ray fan, centered on `heading`.
             2*pi gives a full 360-degree ring (e.g. a spinning lidar);
             anything smaller gives a forward-facing cone.
     """
 
-    num_rays: int = 60
+    num_rays: int = 180
     max_range: float = 5.0
     fov_radians: float = 2.0 * math.pi
+
+    def __post_init__(self) -> None:
+        if self.num_rays <= 0:
+            raise ValueError(f"num_rays must be positive, got {self.num_rays!r}.")
+        if self.max_range <= 0.0:
+            raise ValueError(f"max_range must be positive, got {self.max_range!r}.")
 
 
 @dataclass(slots=True, frozen=True)
 class ObstacleScan:
     """One ray-casting sensor reading, robot-relative.
 
-    Every array is shape (num_rays,), (num_rays, 2), or (num_rays,) int --
-    fixed width no matter how many rays hit something. Rows for a non-hit
-    ray are zeroed in `relative_positions`, `distances` is set to
-    `config.max_range` there, and `hit_type` is `HitType.NONE` -- so
-    `hit_mask` is the only thing a consumer needs to check before trusting
-    a row, and `hit_type` is only meaningful where `hit_mask` is True.
+    Every array is shape (num_rays,) or (num_rays, 2) -- fixed width no
+    matter how many rays hit something. Rows for a non-hit ray are zeroed
+    in `relative_positions`, `distances` is set to `config.max_range`
+    there, and `hit_type` is `HitType.NONE` -- so `hit_mask` is the only
+    thing a consumer needs to check before trusting a row, and `hit_type`
+    is only meaningful where `hit_mask` is True. `distances`, however, is
+    always meaningful (real hit distance, or `max_range` as the effective
+    "sensing boundary" distance) -- `RangeImageBuilder` relies on this.
 
     Attributes:
         hit_mask: (num_rays,) bool -- True where that ray intersected
@@ -109,50 +133,41 @@ class ObstacleScan:
 
     hit_mask: np.ndarray
     hit_type: np.ndarray
-    # distances: np.ndarray
+    distances: np.ndarray
     relative_positions: np.ndarray
-    # ray_angles: np.ndarray
+    ray_angles: np.ndarray
 
 
 #: Per-ray feature layout produced by `scan_to_features`:
 #: [hit_mask, distance_norm, dx_norm, dy_norm, sin(ray_angle), cos(ray_angle)].
-RAY_FEATURE_DIM = 3
+#: Legacy consumer: navcore.policies.crowdnav_pp.obstacle_encoder's 1D-CNN
+#: branch. The current default obstacle branch (RangeImageEncoder) does not
+#: use this -- it consumes RangeImageBuilder's binary image instead.
+RAY_FEATURE_DIM = 6
 
 
 def scan_to_features(scan: ObstacleScan, max_range: float) -> np.ndarray:
     """Convert one `ObstacleScan` into a `(num_rays, RAY_FEATURE_DIM)` array.
 
-    Lives here, not in `policies.crowdnav_pp.obstacle_encoder` (where
-    this used to live) -- this is a pure sensor-encoding concern with
-    no torch dependency, and keeping it in the policy package would
-    force anything that wants ray features (e.g. `ObservationEncoder`)
-    to import from the policy layer, backwards from how this project
-    layers environment/observation code under policies.
+    Canonical, single copy -- see module docstring's consolidation note.
+    Lives here, not in a policy package: this is a pure sensor-encoding
+    concern with no torch dependency.
 
     Returns:
         `(num_rays, RAY_FEATURE_DIM)` float32 array:
         `[hit_mask, distance / max_range, dx / max_range, dy / max_range,
-        sin(theta), cos(theta)]` per ray.
-
-        NOTE: theta is recomputed as a uniform `2*pi*i/num_rays` sweep
-        starting at angle 0 -- it does NOT read `scan.ray_angles`. Only
-        correct for a scan cast with `heading=0.0` and a full `2*pi`
-        fov (what `ObservationEncoder` always uses -- see its own
-        docstring). Not fixed here; flagged as a trap for whoever wires
-        a heading-relative or partial-fov scan in later.
+        sin(theta), cos(theta)]` per ray, using each ray's *actual*
+        `scan.ray_angles` entry (not a re-derived uniform sweep).
     """
     num_rays = scan.hit_mask.shape[0]
     features = np.zeros((num_rays, RAY_FEATURE_DIM), dtype=np.float32)
 
     features[:, 0] = scan.hit_mask.astype(np.float32)
-    # features[:, 1] = scan.distances / max_range
-    features[:, 1] = scan.relative_positions[:, 0] / max_range
-    features[:, 2] = scan.relative_positions[:, 1] / max_range
-
-    indices = np.arange(num_rays, dtype=np.float32)
-    theta = 2.0 * np.pi * indices / num_rays
-    # features[:, 3] = np.sin(theta)
-    # features[:, 4] = np.cos(theta)
+    features[:, 1] = scan.distances / max_range
+    features[:, 2] = scan.relative_positions[:, 0] / max_range
+    features[:, 3] = scan.relative_positions[:, 1] / max_range
+    features[:, 4] = np.sin(scan.ray_angles)
+    features[:, 5] = np.cos(scan.ray_angles)
 
     return features
 
@@ -188,7 +203,7 @@ class ObstacleDetector:
         robot_x: float,
         robot_y: float,
         obstacles: list[BaseGeometry],
-        # boundary: BaseGeometry | None = None,
+        boundary: BaseGeometry | None = None,
         heading: float = 0.0,
     ) -> ObstacleScan:
         """Cast this scan's ray fan from (robot_x, robot_y).
@@ -199,20 +214,21 @@ class ObstacleDetector:
 
         Args:
             robot_x, robot_y: Robot position, world frame.
-            obstacles: Ground-truth obstacle geometries (e.g. env.obstacles).
-                Each is tested as-is against every ray -- pass whatever
-                Shapely geometry type env.obstacles already holds
-                (Polygon, its boundary, etc.) elsewhere in the codebase.
+            obstacles: Ground-truth obstacle geometries (e.g. env.obstacles,
+                excluding the boundary -- pass that separately via
+                `boundary` so hit_type can distinguish the two).
             boundary: Ground-truth environment boundary geometry (walls /
                 free-space perimeter), or None to skip boundary detection
                 entirely (e.g. an unbounded environment). Must be a line
                 geometry (a Polygon's `.exterior`/`.boundary`, or a
                 LineString/MultiLineString of walls) -- passing a filled
                 Polygon means every ray "hits" it at distance 0 from
-                inside. See module docstring's open question #2.
+                inside. See `navcore.entities.obstacles.geometry_conversion
+                .arena_boundary_ring` for the project's existing
+                world-frame boundary-ring builder.
             heading: World-frame angle (radians) the ray fan is centered
-                on. See the module docstring's open question #1 before
-                wiring a real robot heading through here.
+                on. Fixed at 0.0 for navcore's holonomic robot (see module
+                docstring's resolved open question #1).
 
         Returns:
             An ObstacleScan with num_rays entries, ordered to match
@@ -239,13 +255,13 @@ class ObstacleDetector:
                 HitType.OBSTACLE if nearest_distance is not None else HitType.NONE
             )
 
-            # if boundary is not None:
-            #     boundary_distance = _ray_geometry_distance(ray, boundary, origin)
-            #     if boundary_distance is not None and (
-            #         nearest_distance is None or boundary_distance < nearest_distance
-            #     ):
-            #         nearest_distance = boundary_distance
-            #         nearest_type = HitType.BOUNDARY
+            if boundary is not None:
+                boundary_distance = _ray_geometry_distance(ray, boundary, origin)
+                if boundary_distance is not None and (
+                    nearest_distance is None or boundary_distance < nearest_distance
+                ):
+                    nearest_distance = boundary_distance
+                    nearest_type = HitType.BOUNDARY
 
             if nearest_distance is not None and nearest_distance <= max_range:
                 hit_mask[i] = True
@@ -257,7 +273,9 @@ class ObstacleDetector:
         return ObstacleScan(
             hit_mask=hit_mask,
             hit_type=hit_type,
+            distances=distances,
             relative_positions=relative_positions,
+            ray_angles=ray_angles,
         )
 
     @staticmethod

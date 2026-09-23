@@ -1,10 +1,26 @@
 # navcore/policies/crowdnav_pp/obstacle_encoder.py
 """ObstacleEncoder: 1D CNN-based embedding of one ObstacleDetector ray scan.
 
-Turns one tick's ObstacleScan (navcore.sensor.obstacle_detector) into a
-fixed-width embedding, using a 1D Convolutional Neural Network. The output is
-meant to be concatenated into CrowdNavPPPolicy's existing robot/crowd embedding
-space alongside RobotStateEncoder and TemporalEncoder.
+SUPERSEDED, not deleted:
+    This is the obstacle branch's *previous* design (a 1D CNN pooling a
+    per-ray feature scan into a single embedding, concatenated into
+    RobotHumanAttention as extra key/value tokens). It has been replaced
+    end-to-end by the range-image branch: see
+    ``navcore.entities.components.sensors.range_image.RangeImageBuilder``
+    and ``navcore.policies.crowdnav_pp.range_image_encoder.
+    RangeImageEncoder`` for the current design, and
+    ``navcore.policies.crowdnav_pp.policy``'s module docstring for the
+    full architectural rationale (this pooled design is exactly what
+    ``navcore/probe_obstacle_encoder_mirror.py`` found destroys
+    left/right directional information).
+
+    ``CrowdNavPPPolicy`` no longer imports or constructs this class.
+    This file is kept only because some standalone scripts may still
+    reference it directly; do not wire it into new policy code.
+
+Turns one tick's ObstacleScan (navcore.entities.components.sensors.
+obstacle_detector) into a fixed-width embedding, using a 1D Convolutional
+Neural Network.
 
 A LiDAR-style ray scan forms a ring around the robot. To capture spatial
 patterns properly without introducing a seam at the start/end of the array,
@@ -17,15 +33,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-import numpy.typing as npt
-import torch
 from torch import Tensor, nn
 
 from navcore.entities.components.sensors.obstacle_detector import (
     RAY_FEATURE_DIM,
-    ObstacleScan,
+    scan_to_features,
 )
+
+# Re-exported for backward compatibility -- callers that used to import
+# `scan_to_features`/`RAY_FEATURE_DIM` from this module still can, but the
+# canonical, single copy now lives in obstacle_detector.py (see that
+# module's "Consolidation note"). Do not add a second implementation here.
+__all__ = [
+    "ObstacleEncoder",
+    "ObstacleEncoderConfig",
+    "scan_to_features",
+    "RAY_FEATURE_DIM",
+]
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,7 +58,7 @@ class ObstacleEncoderConfig:
 
     Attributes:
         ray_feature_dim: Width of one ray's feature vector. Defaults to
-            `RAY_FEATURE_DIM` (3).
+            `RAY_FEATURE_DIM` (6).
         embedding_dim: Dimensionality of the final output embedding.
         conv_channels: Number of channels for each of the 3 Conv1d layers.
         kernel_sizes: Kernel sizes for each of the 3 Conv1d layers.
@@ -81,12 +105,9 @@ class ObstacleEncoderConfig:
 class ObstacleEncoder(nn.Module):
     """1D CNN over one ray scan's rays, producing one fixed-width embedding.
 
-    Extracts spatial features using circular padding to respect the ring
-    topology of a LiDAR scan, pools them, and applies a linear projection.
-
-    Attributes:
-        config: This encoder's hyperparameters.
-        net: The sequential CNN model.
+    See module docstring: superseded by ``RangeImageEncoder`` for
+    ``CrowdNavPPPolicy``'s default architecture. Left implemented and
+    importable for backward compatibility only.
     """
 
     def __init__(self, config: ObstacleEncoderConfig) -> None:
@@ -160,42 +181,3 @@ class ObstacleEncoder(nn.Module):
 
         # Reshape back to the original leading batch dimensions
         return embedding.reshape(*leading, num_rays, self.config.output_dim)
-
-
-def scan_to_features(scan: ObstacleScan, max_range: float) -> npt.NDArray[np.float32]:
-    """Convert one `ObstacleScan` into the `(num_rays, RAY_FEATURE_DIM)`
-    array `ObstacleEncoder` expects.
-
-    Args:
-        scan: One tick's ray-casting result (obstacles + boundary).
-        max_range: The `ObstacleDetectorConfig.max_range` the scan was cast
-            with, used to normalize distances and relative positions into
-            a continuous scale.
-
-    Returns:
-        `(num_rays, RAY_FEATURE_DIM)` float32 array:
-        `[hit_mask, distance / max_range, dx / max_range, dy / max_range,
-        sin(theta), cos(theta)]` per ray, where theta is the ray angle.
-    """
-    num_rays = scan.hit_mask.shape[0]
-    features = np.zeros((num_rays, RAY_FEATURE_DIM), dtype=np.float32)
-
-    # 1. hit_mask (0 or 1)
-    features[:, 0] = scan.hit_mask.astype(np.float32)
-
-    # 2. distance_norm
-    features[:, 1] = scan.distances / max_range
-
-    # 3. dx_norm
-    features[:, 2] = scan.relative_positions[:, 0] / max_range
-
-    # 4. dy_norm
-    features[:, 3] = scan.relative_positions[:, 1] / max_range
-
-    # 5 & 6. Ray angles (uniformly distributed over 0 to 2*pi)
-    indices = np.arange(num_rays, dtype=np.float32)
-    theta = 2.0 * np.pi * indices / num_rays
-    features[:, 4] = np.sin(theta)
-    features[:, 5] = np.cos(theta)
-
-    return features
