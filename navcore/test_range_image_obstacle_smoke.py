@@ -1,41 +1,40 @@
-"""Shape/gradient smoke test for the new range-image obstacle branch.
+"""Shape/gradient smoke test for the assembled CrowdNavPPPolicy.
 
-Deliberately not pytest-based, matching test_crowdnav_pp_smoke.py's and
-test_regression.py's harness convention (no pytest dependency, runs
-anywhere the project runs).
+Flagged as the immediate next step in policy.py's own module docstring:
+every submodule (RobotStateEncoder, HumanHumanAttention, RobotHumanAttention,
+RecurrentNodeUpdate, ActorCriticHeads, DiagGaussianHead) was shape-tested
+individually, but the full forward()/act() path was never run end-to-end
+against real CrowdSimEnv observation shapes. This is that missing check.
+
+Scope note: this suite covers the human/attention/recurrent core only.
+Obstacle-branch coverage (RangeImageEncoder, RobotObstacleAttention,
+ContextFusionGate, CrowdNavPPPolicy with use_range_image_obstacles=True)
+lives in test_range_image_obstacle_smoke.py, not here -- see that file's
+checks 6-8. Do not re-add obstacle-branch checks in this file; the two
+legacy-API variants that previously lived here (against the removed
+use_obstacle_encoder/obstacle_encoder/ray_features surface) were dead code
+by construction (nested inside check 5, never actually registered) and
+have been removed rather than migrated, to avoid duplicating
+test_range_image_obstacle_smoke.py's coverage.
+
+Deliberately not pytest-based, matching test_regression.py's harness
+convention (no pytest dependency, runs anywhere the project runs).
 
 Run directly:
 
-    python -m navcore.test_range_image_obstacle_smoke
+    python -m navcore.test_crowdnav_pp_smoke
 """
 
 from __future__ import annotations
 
-import inspect
 import sys
 import traceback
 
 import torch
 
-from navcore.entities.components.sensors.obstacle_detector import (
-    ObstacleDetector,
-    ObstacleDetectorConfig,
-)
-from navcore.entities.components.sensors.range_image import (
-    RangeImageBuilder,
-    RangeImageBuilderConfig,
-)
-from navcore.policies.crowdnav_pp.fusion_gate import ContextFusionGate, FusionGateConfig
+from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimEnvConfig
+from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
 from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
-from navcore.policies.crowdnav_pp.range_image_encoder import (
-    RangeImageEncoder,
-    RangeImageEncoderConfig,
-)
-from navcore.policies.crowdnav_pp.robot_human_attention import RobotHumanAttention
-from navcore.policies.crowdnav_pp.robot_obstacle_attention import (
-    RobotObstacleAttention,
-    RobotObstacleAttentionConfig,
-)
 
 _CHECKS: list[tuple[str, callable]] = []
 
@@ -48,247 +47,239 @@ def check(name: str):
     return decorator
 
 
-_RANGE_IMAGE_CONFIG = RangeImageBuilderConfig(
-    num_rays=180, num_range_bins=128, max_range=5.0
-)
-_ENCODER_CONFIG = RangeImageEncoderConfig(
-    in_height=128,
-    in_width=180,
-    stem_channels=32,
-    stage_channels=(32, 64, 128),
-    blocks_per_stage=(2, 2, 2),
-    downsample_after_stage=(True, True, False),
-    token_embedding_dim=128,
-    num_obstacle_tokens=15,
-)
-
-
-def _policy_config(use_range_image_obstacles: bool) -> CrowdNavPPPolicyConfig:
-    return CrowdNavPPPolicyConfig(
-        robot_feature_dim=8,
-        neighbor_feature_dim=5,
-        use_range_image_obstacles=use_range_image_obstacles,
-        range_image_encoder=_ENCODER_CONFIG,
-        robot_obstacle_attention=RobotObstacleAttentionConfig(
-            robot_embedding_dim=256, obstacle_embedding_dim=128, num_attention_heads=4
-        ),
-        fusion_gate=FusionGateConfig(embedding_dim=256, hidden_size=128),
+def _build_env_and_obs():
+    config = CrowdSimEnvConfig(
+        action_mode=ActionMode.VELOCITY, include_static_obstacles=False
     )
+    env = CrowdSimEnv(GoalReachingTask(), config)
+    obs, _ = env.reset(seed=0)
+    return env, obs
 
 
-def _dummy_batch(nenv: int, max_neighbors: int = 10, history_steps: int = 8):
-    robot = torch.randn(nenv, 8)
-    neighbors = torch.randn(nenv, max_neighbors, 5)
-    neighbor_mask = torch.ones(nenv, max_neighbors, dtype=torch.int8)
-    history = torch.randn(nenv, history_steps, max_neighbors, 5)
-    history_mask = torch.ones(nenv, history_steps, max_neighbors, dtype=torch.int8)
-    range_image = torch.randint(0, 2, (nenv, 1, 128, 180)).float()
-    return robot, neighbors, neighbor_mask, history, history_mask, range_image
+def _to_batch(obs, nenv=1):
+    return {
+        k: torch.as_tensor(v, dtype=torch.float32)
+        .unsqueeze(0)
+        .repeat(nenv, *([1] * v.ndim))
+        for k, v in obs.items()
+    }
 
 
-@check("1. RangeImageBuilder produces a well-formed binary image")
-def _test_range_image_builder():
-    detector = ObstacleDetector(ObstacleDetectorConfig(num_rays=180, max_range=5.0))
-    builder = RangeImageBuilder(_RANGE_IMAGE_CONFIG)
-
-    # No obstacles at all -> every ray effectively "hits" the sensing
-    # boundary at max_range (ObstacleDetector's own no-hit default).
-    scan = detector.sense(0.0, 0.0, obstacles=[])
-    image = builder.build(scan)
-    assert image.shape == (1, 128, 180), f"unexpected shape {image.shape}"
-    assert image.dtype == __import__("numpy").float32
-    assert set(image.reshape(-1).tolist()) <= {0.0, 1.0}, "image must be binary"
-    # Only the far edge (row 0) should be blocked; everything else free.
-    assert (image[0, 0, :] == 0.0).all(), "far edge (max range) must be blocked"
-    assert (image[0, 1:, :] == 1.0).all(), (
-        "everything closer than max range must be free"
+@check("1. forward() runs and returns correctly-shaped outputs")
+def _test_forward_shapes():
+    env, obs = _build_env_and_obs()
+    policy_config = CrowdNavPPPolicyConfig(
+        robot_feature_dim=obs["robot"].shape[-1],
+        neighbor_feature_dim=obs["neighbors"].shape[-1],
     )
+    policy = CrowdNavPPPolicy(policy_config)
 
-
-@check("2. RangeImageEncoder forward pass produces correctly-shaped tokens")
-def _test_range_image_encoder_forward():
-    encoder = RangeImageEncoder(_ENCODER_CONFIG)
     nenv = 3
-    range_image = torch.randint(0, 2, (nenv, 1, 128, 180)).float()
-
-    tokens = encoder(range_image)
-    assert tokens.shape == (nenv, 15, 128), f"unexpected token shape {tokens.shape}"
-    assert torch.isfinite(tokens).all()
-
-
-@check("3. RobotObstacleAttention forward pass and shape validation")
-def _test_robot_obstacle_attention():
-    attn = RobotObstacleAttention(
-        RobotObstacleAttentionConfig(
-            robot_embedding_dim=256, obstacle_embedding_dim=128, num_attention_heads=4
-        )
-    )
-    nenv = 4
-    robot_embedding = torch.randn(nenv, 256)
-    obstacle_tokens = torch.randn(nenv, 15, 128)
-
-    context = attn(robot_embedding, obstacle_tokens)
-    assert context.shape == (nenv, 128)
-
-    try:
-        attn(torch.randn(nenv, 99), obstacle_tokens)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError on robot_embedding width mismatch")
-
-
-@check("4. ContextFusionGate keeps gate values within [0, 1]")
-def _test_fusion_gate_range():
-    gate_module = ContextFusionGate(FusionGateConfig(embedding_dim=256, hidden_size=64))
-    nenv = 8
-    human = torch.randn(nenv, 256) * 10.0  # large magnitudes to stress the sigmoid
-    obstacle = torch.randn(nenv, 256) * 10.0
-
-    fused = gate_module(human, obstacle)
-    assert fused.shape == (nenv, 256)
-    assert gate_module.last_gate is not None
-    assert torch.all(gate_module.last_gate >= 0.0) and torch.all(
-        gate_module.last_gate <= 1.0
-    )
-    assert gate_module.last_gate.shape == (nenv, 256), (
-        "gate must be feature-wise, not scalar"
-    )
-
-
-@check("5. RobotHumanAttention no longer accepts obstacle_embedding/obstacle_mask")
-def _test_robot_human_attention_signature():
-    params = inspect.signature(RobotHumanAttention.forward).parameters
-    assert "obstacle_embedding" not in params
-    assert "obstacle_mask" not in params
-    assert list(params.keys()) == [
-        "self",
-        "robot_embedding",
-        "human_embeddings",
-        "visible_mask",
-    ]
-
-
-@check("6. CrowdNavPPPolicy forward pass with obstacle branch enabled")
-def _test_policy_forward_with_obstacles():
-    config = _policy_config(use_range_image_obstacles=True)
-    policy = CrowdNavPPPolicy(config)
-    nenv = 2
-    robot, neighbors, neighbor_mask, history, history_mask, range_image = _dummy_batch(
-        nenv
-    )
+    batch = _to_batch(obs, nenv=nenv)
     hidden = policy.initial_hidden_state(nenv=nenv)
     not_done = torch.ones(nenv)
 
     distribution, value, new_hidden = policy.forward(
-        robot,
-        neighbors,
-        neighbor_mask,
-        history,
-        history_mask,
+        batch["robot"],
+        batch["neighbors"],
+        batch["neighbor_mask"],
+        batch["neighbor_history"],
+        batch["neighbor_history_mask"],
         hidden,
         not_done,
-        range_image=range_image,
-    )
-    assert value.shape == (nenv, 1)
-    assert new_hidden.shape == (nenv, config.rnn_hidden_size)
-    assert distribution.sample().shape == (nenv, config.action_dim)
-
-
-@check(
-    "7. CrowdNavPPPolicy rejects range_image when the branch is disabled, and vice versa"
-)
-def _test_policy_obstacle_flag_consistency():
-    config_off = _policy_config(use_range_image_obstacles=False)
-    policy_off = CrowdNavPPPolicy(config_off)
-    nenv = 2
-    robot, neighbors, neighbor_mask, history, history_mask, range_image = _dummy_batch(
-        nenv
-    )
-    hidden = policy_off.initial_hidden_state(nenv=nenv)
-    not_done = torch.ones(nenv)
-
-    # Branch disabled + no range_image -> fine.
-    policy_off.forward(
-        robot, neighbors, neighbor_mask, history, history_mask, hidden, not_done
     )
 
-    # Branch disabled + range_image given -> must raise.
-    try:
-        policy_off.forward(
-            robot,
-            neighbors,
-            neighbor_mask,
-            history,
-            history_mask,
+    assert value.shape == (nenv, 1), f"value shape {value.shape}, expected {(nenv, 1)}"
+    assert new_hidden.shape == (nenv, policy_config.rnn_hidden_size), (
+        f"hidden shape {new_hidden.shape}"
+    )
+    sample = distribution.sample()
+    assert sample.shape == (nenv, policy_config.action_dim), (
+        f"action sample shape {sample.shape}"
+    )
+    env.close() if hasattr(env, "close") else None
+
+
+@check("2. act() returns finite action/log_prob/value, and hidden state changes")
+def _test_act_and_hidden_state_updates():
+    env, obs = _build_env_and_obs()
+    policy_config = CrowdNavPPPolicyConfig(
+        robot_feature_dim=obs["robot"].shape[-1],
+        neighbor_feature_dim=obs["neighbors"].shape[-1],
+    )
+    policy = CrowdNavPPPolicy(policy_config)
+    policy.eval()
+
+    batch = _to_batch(obs, nenv=1)
+    hidden = policy.initial_hidden_state(nenv=1)
+    not_done = torch.ones(1)
+
+    with torch.no_grad():
+        action, log_prob, value, new_hidden = policy.act(
+            batch["robot"],
+            batch["neighbors"],
+            batch["neighbor_mask"],
+            batch["neighbor_history"],
+            batch["neighbor_history_mask"],
             hidden,
             not_done,
-            range_image=range_image,
+            deterministic=False,
         )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError: range_image given, branch disabled")
 
-    # Branch enabled + no range_image -> must raise.
-    config_on = _policy_config(use_range_image_obstacles=True)
-    policy_on = CrowdNavPPPolicy(config_on)
-    try:
-        policy_on.forward(
-            robot, neighbors, neighbor_mask, history, history_mask, hidden, not_done
-        )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError: branch enabled, range_image missing")
-
-
-@check("8. Gradients reach every obstacle-branch submodule from one backward pass")
-def _test_gradients_reach_obstacle_branch():
-    config = _policy_config(use_range_image_obstacles=True)
-    policy = CrowdNavPPPolicy(config)
-    policy.train()
-    nenv = 2
-    robot, neighbors, neighbor_mask, history, history_mask, range_image = _dummy_batch(
-        nenv
+    assert torch.isfinite(action).all(), "action contains NaN/inf"
+    assert torch.isfinite(log_prob).all(), "log_prob contains NaN/inf"
+    assert torch.isfinite(value).all(), "value contains NaN/inf"
+    assert not torch.allclose(new_hidden, hidden), (
+        "hidden state did not change after one tick -- RecurrentNodeUpdate "
+        "may not be wired correctly."
     )
-    hidden = torch.randn(nenv, config.rnn_hidden_size)  # nonzero, see smoke-test #4's
-    # sibling check in test_crowdnav_pp_smoke.py for why a zero initial
-    # hidden state would zero out the GRU's weight_hh gradient regardless
-    # of correctness elsewhere.
+
+
+@check("3. not_done_mask=0 actually resets the hidden state")
+def _test_hidden_state_reset_on_done():
+    env, obs = _build_env_and_obs()
+    policy_config = CrowdNavPPPolicyConfig(
+        robot_feature_dim=obs["robot"].shape[-1],
+        neighbor_feature_dim=obs["neighbors"].shape[-1],
+    )
+    policy = CrowdNavPPPolicy(policy_config)
+    policy.eval()
+
+    batch = _to_batch(obs, nenv=1)
+    nonzero_hidden = torch.randn(1, policy_config.rnn_hidden_size)
+
+    with torch.no_grad():
+        _, _, _, new_hidden = policy.act(
+            batch["robot"],
+            batch["neighbors"],
+            batch["neighbor_mask"],
+            batch["neighbor_history"],
+            batch["neighbor_history_mask"],
+            nonzero_hidden,
+            torch.zeros(1),  # not_done_mask=0 -> reset
+            deterministic=True,
+        )
+
+    with torch.no_grad():
+        _, _, _, expected_hidden = policy.act(
+            batch["robot"],
+            batch["neighbors"],
+            batch["neighbor_mask"],
+            batch["neighbor_history"],
+            batch["neighbor_history_mask"],
+            torch.zeros(1, policy_config.rnn_hidden_size),
+            torch.ones(1),
+            deterministic=True,
+        )
+
+    assert torch.allclose(new_hidden, expected_hidden, atol=1e-5), (
+        "not_done_mask=0 did not reset the incoming hidden state to zero "
+        "before the GRU update."
+    )
+
+
+@check("4. Gradients flow into every submodule from a single backward pass")
+def _test_gradients_reach_every_submodule():
+    env, obs = _build_env_and_obs()
+    policy_config = CrowdNavPPPolicyConfig(
+        robot_feature_dim=obs["robot"].shape[-1],
+        neighbor_feature_dim=obs["neighbors"].shape[-1],
+    )
+    policy = CrowdNavPPPolicy(policy_config)
+    policy.train()
+
+    nenv = 2
+    batch = _to_batch(obs, nenv=nenv)
+
+    # Force at least 2 real, non-degenerate visible neighbors per env,
+    # rather than trusting whatever the random env reset happened to
+    # produce. A single visible neighbor makes softmax attention
+    # saturate to exactly 1.0 regardless of the query/key scores, which
+    # zeroes the gradient w.r.t. every score-producing layer (the
+    # query/key projections in both attention modules) no matter how
+    # the network is wired -- not a bug, just a degenerate case this
+    # test must not depend on pedestrian spawn luck to avoid. The same
+    # applies to the temporal encoder's LSTM: if no real neighbor is
+    # visible across the history window, its cell never sees a nonzero
+    # input and its weights never get gradient either.
+    max_neighbors = batch["neighbors"].shape[1]
+    history_steps = batch["neighbor_history"].shape[1]
+    n_forced = min(2, max_neighbors)
+
+    batch["neighbors"][:, :n_forced, :] = torch.randn(
+        nenv, n_forced, batch["neighbors"].shape[-1]
+    )
+    batch["neighbor_mask"][:, :n_forced] = 1
+    batch["neighbor_mask"][:, n_forced:] = 0
+
+    batch["neighbor_history"][:, :, :n_forced, :] = torch.randn(
+        nenv, history_steps, n_forced, batch["neighbor_history"].shape[-1]
+    )
+    batch["neighbor_history_mask"][:, :, :n_forced] = 1
+    batch["neighbor_history_mask"][:, :, n_forced:] = 0
+
+    # A zeroed initial hidden state makes RecurrentNodeUpdate.gru_cell's
+    # gradient w.r.t. weight_hh identically zero for a single tick --
+    # GRUCell's gate equations multiply weight_hh by the *incoming*
+    # hidden state, so zero in means zero gradient out, independent of
+    # everything else. This is inherent to a one-step call from a fresh
+    # state, not something forcing neighbors fixes. Seed a nonzero
+    # hidden state instead, with not_done_mask=1 so RecurrentNodeUpdate
+    # doesn't reset it back to zero before the update.
+    hidden = torch.randn(nenv, policy_config.rnn_hidden_size)
     not_done = torch.ones(nenv)
 
     distribution, value, _ = policy.forward(
-        robot,
-        neighbors,
-        neighbor_mask,
-        history,
-        history_mask,
+        batch["robot"],
+        batch["neighbors"],
+        batch["neighbor_mask"],
+        batch["neighbor_history"],
+        batch["neighbor_history_mask"],
         hidden,
         not_done,
-        range_image=range_image,
     )
+
+    # rsample(), not sample(): torch.distributions.Normal.sample() is
+    # explicitly non-differentiable (drawn under no_grad internally), so
+    # a loss built from it carries zero gradient back through the
+    # action head regardless of correctness. rsample()'s reparameterized
+    # draw (mean + std * noise, noise detached) is what actually needs
+    # to be checked here.
     loss = distribution.rsample().pow(2).sum() + value.sum()
     loss.backward()
 
-    obstacle_modules = {
-        "range_image_encoder": policy.range_image_encoder,
-        "robot_obstacle_attention": policy.robot_obstacle_attention,
-        "obstacle_context_proj": policy.obstacle_context_proj,
-        "fusion_gate": policy.fusion_gate,
-        "robot_encoder": policy.robot_encoder,
-        "human_human_attention": policy.human_human_attention,
-        "robot_human_attention": policy.robot_human_attention,
-        "recurrent_update": policy.recurrent_update,
-    }
-    dead: list[str] = []
-    for name, module in obstacle_modules.items():
-        assert module is not None, f"{name} was not constructed"
-        for param_name, p in module.named_parameters():
-            if p.requires_grad and (p.grad is None or torch.all(p.grad == 0)):
-                dead.append(f"{name}.{param_name}")
-
+    dead = [
+        name
+        for name, p in policy.named_parameters()
+        if p.requires_grad and (p.grad is None or torch.all(p.grad == 0))
+    ]
     assert not dead, f"No gradient reached: {dead}"
+
+
+@check("5. Zero-visible-neighbors episode doesn't NaN (dummy-human substitution)")
+def _test_zero_neighbors_no_nan():
+    policy_config = CrowdNavPPPolicyConfig(robot_feature_dim=8, neighbor_feature_dim=5)
+    policy = CrowdNavPPPolicy(policy_config)
+    policy.eval()
+
+    nenv = 1
+    robot = torch.randn(nenv, 8)
+    neighbors = torch.zeros(nenv, 10, 5)
+    mask = torch.zeros(nenv, 10, dtype=torch.int8)  # nobody visible
+    history = torch.zeros(nenv, 8, 10, 5)
+    history_mask = torch.zeros(nenv, 8, 10, dtype=torch.int8)
+    hidden = policy.initial_hidden_state(nenv=nenv)
+    not_done = torch.ones(nenv)
+
+    with torch.no_grad():
+        distribution, value, _ = policy.forward(
+            robot, neighbors, mask, history, history_mask, hidden, not_done
+        )
+
+    assert torch.isfinite(distribution.mean).all(), (
+        "NaN in action mean with 0 neighbors"
+    )
+    assert torch.isfinite(value).all(), "NaN in value with 0 neighbors"
 
 
 def main() -> int:
