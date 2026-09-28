@@ -15,13 +15,14 @@ import torch
 
 from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimEnvConfig
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
-from navcore.policies.crowdnav_pp.obstacle_encoder import (
-    ObstacleEncoder,
-    ObstacleEncoderConfig,
-)
 from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
     CrowdNavPPPolicy,
     CrowdNavPPPolicyConfig,
+    ObstacleMode,
+)
+from navcore.policies.crowdnav_pp.obstacle_encoder import (
+    ObstacleEncoder,
+    ObstacleEncoderConfig,
 )
 from navcore.training.crowd_nav_pp.crowd_nav_pp_trainer import (
     CrowdNavPPTrainer,
@@ -49,7 +50,18 @@ def main() -> None:
     parser.add_argument("--max-neighbors", type=int, default=10)
     parser.add_argument("--history-steps", type=int, default=5)
     parser.add_argument("--max-episode-steps", type=int, default=1500)
-    parser.add_argument("--use-obstacle-encoder", action="store_true", default=False)
+    parser.add_argument(
+        "--obstacle-mode",
+        type=str,
+        choices=["none", "encoder", "point_tokens"],
+        default="none",
+        help=(
+            "How obstacles are represented: "
+            "'none' = ignore obstacles, "
+            "'encoder' = ObstacleEncoder tokens, "
+            "'point_tokens' = obstacle point tokens."
+        ),
+    )
     parser.add_argument("--obstacle-num-rays", type=int, default=60)
     parser.add_argument("--obstacle-max-range", type=float, default=5.0)
     parser.add_argument(
@@ -105,8 +117,10 @@ def main() -> None:
             args.gst_checkpoint, device=args.device
         )
 
+    obstacle_mode = ObstacleMode(args.obstacle_mode)
+
     obstacle_encoder = None
-    if args.use_obstacle_encoder:
+    if obstacle_mode is ObstacleMode.ENCODER:
         obstacle_encoder = ObstacleEncoder(ObstacleEncoderConfig())
 
     # Defaults already match ObservationEncoder's actual feature widths
@@ -115,7 +129,7 @@ def main() -> None:
     policy = CrowdNavPPPolicy(
         CrowdNavPPPolicyConfig(
             use_gst_prediction=args.use_gst_prediction,
-            use_obstacle_encoder=args.use_obstacle_encoder,
+            obstacle_mode=obstacle_mode,
         ),
         gst_predictor=gst_predictor,
         obstacle_encoder=obstacle_encoder,

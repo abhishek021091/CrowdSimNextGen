@@ -499,7 +499,6 @@ class CrowdNavPPPolicy(nn.Module):
                 dim=1,
             )
             token_mask = torch.cat((neighbor_mask, obstacle_hit_mask), dim=1)
-
         # HumanHumanAttention/RobotHumanAttention carry an explicit
         # seq_len axis (see their own docstrings); this policy is
         # single-tick-only (see module docstring), so seq_len is always

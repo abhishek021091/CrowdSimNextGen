@@ -112,7 +112,7 @@ class GSTPredictorTrainer:
     @staticmethod
     def load_predictor(path: str, device: str = "cpu") -> GSTPredictor:
         """Load a pretrained GSTPredictor, frozen for use inside CrowdNavPPPolicy."""
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         predictor = GSTPredictor(checkpoint["predictor_config"])
         predictor.load_state_dict(checkpoint["predictor_state_dict"])
         predictor.to(device)

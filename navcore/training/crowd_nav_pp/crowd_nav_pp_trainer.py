@@ -34,7 +34,10 @@ import torch
 from torch import Tensor
 
 from navcore.analysis.metrics_logger import TrainingMetricsLogger
-from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import CrowdNavPPPolicy
+from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
+    CrowdNavPPPolicy,
+    ObstacleMode,
+)
 from navcore.training.crowd_nav_pp.rollout_buffer import RecurrentRolloutBuffer
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 
@@ -215,17 +218,21 @@ class CrowdNavPPTrainer:
         outcomes = {"success": 0, "collision": 0, "out_of_bounds": 0, "timeout": 0}
         episode_reward = np.zeros(self.n_envs, dtype=np.float32)
         episode_length = np.zeros(self.n_envs, dtype=np.int64)
-        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
+        obstacle_mode = self.policy.config.obstacle_mode
+        uses_ray_features = obstacle_mode is not ObstacleMode.NONE
 
         for _ in range(self.config.n_steps):
             not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
             obs_t = _to_tensor_batch(self._obs, self.device)
+            print(obs_t["neighbor_history_mask"])
+            print(obs_t["neighbor_history"])
+            print(obs_t["neighbor_mask"])
             not_done_mask_t = torch.as_tensor(
                 not_done_mask, dtype=torch.float32, device=self.device
             )
 
             extra_kwargs = {}
-            if use_obstacle_encoder:
+            if uses_ray_features:
                 extra_kwargs["ray_features"] = obs_t["ray_features"]
 
             with torch.no_grad():
@@ -279,7 +286,9 @@ class CrowdNavPPTrainer:
                 bootstrap_not_done_mask, dtype=torch.float32, device=self.device
             )
             extra_kwargs = {}
-            if use_obstacle_encoder:
+            extra_kwargs = {}
+
+            if uses_ray_features:
                 extra_kwargs["ray_features"] = obs_t["ray_features"]
             _, last_value_t, _ = self.policy.forward(
                 obs_t["robot"],
@@ -332,14 +341,15 @@ class CrowdNavPPTrainer:
         hidden = self.buffer.initial_hidden_state
         assert hidden is not None
 
-        use_obstacle_encoder = self.policy.config.use_obstacle_encoder
+        obstacle_mode = self.policy.config.obstacle_mode
+        uses_ray_features = obstacle_mode is not ObstacleMode.NONE
         log_probs: list[Tensor] = []
         values: list[Tensor] = []
         entropies: list[Tensor] = []
 
         for t in range(T):
             extra_kwargs = {}
-            if use_obstacle_encoder:
+            if obstacle_mode is ObstacleMode.POINT_TOKENS:
                 extra_kwargs["ray_features"] = obs["ray_features"][t]
             distribution, value, hidden = self.policy.forward(
                 obs["robot"][t],
