@@ -34,7 +34,7 @@ import torch
 from torch import Tensor
 
 from navcore.analysis.metrics_logger import TrainingMetricsLogger
-from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy
+from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import CrowdNavPPPolicy
 from navcore.training.crowd_nav_pp.rollout_buffer import RecurrentRolloutBuffer
 from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 

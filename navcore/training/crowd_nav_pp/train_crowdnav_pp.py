@@ -19,7 +19,10 @@ from navcore.policies.crowdnav_pp.obstacle_encoder import (
     ObstacleEncoder,
     ObstacleEncoderConfig,
 )
-from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
+from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
+    CrowdNavPPPolicy,
+    CrowdNavPPPolicyConfig,
+)
 from navcore.training.crowd_nav_pp.crowd_nav_pp_trainer import (
     CrowdNavPPTrainer,
     PPOConfig,

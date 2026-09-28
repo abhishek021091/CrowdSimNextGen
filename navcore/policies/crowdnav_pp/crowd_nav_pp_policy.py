@@ -7,7 +7,7 @@ policy the paper describes: per-tick robot + neighbor features in, an
 action distribution + value estimate + updated recurrent hidden state out.
 This is the file that finally resolves the composition questions each of
 those modules deliberately left open for "whoever builds this piece" --
-see the three design-decision notes below.
+see the design-decision notes below.
 
 Design decision -- spatial_edge_feature_dim composition:
     ``HumanHumanAttention`` documents that its ``spatial_edge_feature_dim``
@@ -49,6 +49,31 @@ Design decision -- the "zero visible humans" case:
     inside the attention modules would force every caller, even ones
     that can guarantee non-empty visibility another way, to pay for it.
 
+Design decision -- how static obstacles reach the network (``ObstacleMode``):
+    Three mutually exclusive modes, selected by
+    ``CrowdNavPPPolicyConfig.obstacle_mode``:
+
+    - ``NONE``: obstacles are invisible to the policy.
+    - ``ENCODER``: ray features go through ``ObstacleEncoder`` (1D CNN,
+      one embedding per ray) and enter ``RobotHumanAttention`` as extra
+      key/value tokens. Kept as the ablation baseline.
+    - ``POINT_TOKENS``: every ray that hit something becomes a
+      pseudo-human token (rel_px, rel_py, 0, 0, hit_radius) plus an
+      explicit ``is_obstacle`` flag, is concatenated onto the real human
+      tokens, and flows through ``HumanHumanAttention`` and
+      ``RobotHumanAttention`` exactly like a pedestrian (see
+      ``ObstacleTokenizer``). Obstacle tokens get a zero temporal
+      embedding (ray index has no persistent identity, so a per-ray
+      history would be meaningless) and zero GST prediction (a static
+      point's predicted displacement is genuinely zero).
+
+    Known caveat of POINT_TOKENS: pedestrians ignore obstacles in this
+    simulator (their planner is built without obstacles), so the
+    obstacle->human direction of human-human attention carries no signal
+    about pedestrian motion. The useful consumer is the robot. Making
+    obstacle tokens key/value-only in human-human attention is the
+    natural, cheaper follow-up ablation; it is not implemented here.
+
 Recurrent-state convention:
     Matches ``RecurrentNodeUpdate``'s own convention (see its docstring):
     the hidden state is threaded explicitly by the caller, never stored
@@ -69,15 +94,12 @@ Not yet resolved here (flagged, not silently decided):
       correct, testable ``nn.Module``" -- wiring it into a specific RL
       framework's policy base class is a separate, framework-specific
       decision.
-    - No shape/gradient smoke test yet, breaking from this project's
-      usual "each module is shape-tested before the next is built"
-      workflow -- this is the assembly step itself, so there was nothing
-      to test it against until now. Recommended immediate next step.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import torch
 from torch import Tensor, nn
@@ -100,6 +122,10 @@ from navcore.policies.crowdnav_pp.human_human_attention import (
 from navcore.policies.crowdnav_pp.obstacle_encoder import (
     ObstacleEncoder,
     ObstacleEncoderConfig,
+)
+from navcore.policies.crowdnav_pp.obstacle_tokenizer import (
+    ObstacleTokenizer,
+    ObstacleTokenizerConfig,
 )
 from navcore.policies.crowdnav_pp.recurrent_node_update import (
     RecurrentNodeUpdate,
@@ -128,6 +154,14 @@ from navcore.policies.gst_predictor.gst_predictor import GSTPredictor
 #: here -- fixing that coupling belongs in ObservationEncoder itself, as
 #: a separate, dedicated cleanup, not smuggled into this file.
 _NEIGHBOR_MOTION_SLICE = slice(2, 4)
+
+
+class ObstacleMode(Enum):
+    """How static obstacles (ray-cast hits) reach the policy."""
+
+    NONE = "none"
+    ENCODER = "encoder"
+    POINT_TOKENS = "point_tokens"
 
 
 @dataclass(slots=True, frozen=True)
@@ -167,6 +201,15 @@ class CrowdNavPPPolicyConfig:
             and DiagGaussianHead's input width (256 in the original).
         action_dim: Number of continuous action dimensions (2 for
             navcore's (vx, vy) velocity action space).
+        obstacle_mode: How ray-cast obstacle hits reach the network
+            (see module docstring's ``ObstacleMode`` note).
+        obstacle_max_range: The ``ObstacleDetectorConfig.max_range`` the
+            ray scans are cast with. Only read in ``POINT_TOKENS`` mode,
+            to convert normalized hit offsets back to meters. MUST match
+            the env's ``obstacle_max_range`` -- a mismatch silently
+            rescales every obstacle position.
+        obstacle_hit_radius: Radius given to every obstacle token, in
+            meters. Only read in ``POINT_TOKENS`` mode.
     """
 
     robot_feature_dim: int = 8
@@ -184,13 +227,22 @@ class CrowdNavPPPolicyConfig:
     action_dim: int = 2
     use_gst_prediction: bool = False
     gst_pred_length: int = 5
-    use_obstacle_encoder: bool = False
+    obstacle_mode: ObstacleMode = ObstacleMode.NONE
+    obstacle_max_range: float = 5.0
+    obstacle_hit_radius: float = 0.1
+
+    @property
+    def uses_ray_features(self) -> bool:
+        """Whether ``forward()`` needs ``ray_features`` in this mode."""
+        return self.obstacle_mode is not ObstacleMode.NONE
 
     @property
     def spatial_edge_feature_dim(self) -> int:
         base = self.neighbor_feature_dim + self.temporal_hidden_size
         if self.use_gst_prediction:
             base += self.gst_pred_length * 2
+        if self.obstacle_mode is ObstacleMode.POINT_TOKENS:
+            base += 1  # explicit is_obstacle type flag
         return base
 
 
@@ -206,7 +258,8 @@ class CrowdNavPPPolicy(nn.Module):
     Attributes:
         config: This policy's hyperparameters.
         gst_predictor: A pretrained GSTPredictor for making future trajectory predictions.
-        obstacle_encoder: A pretrained ObstacleEncoder for encoding obstacle information.
+        obstacle_encoder: ObstacleEncoder, present only in ``ObstacleMode.ENCODER``.
+        obstacle_tokenizer: Ray-hit tokenizer, present only in ``ObstacleMode.POINT_TOKENS``.
     """
 
     def __init__(
@@ -228,15 +281,35 @@ class CrowdNavPPPolicy(nn.Module):
 
         # Injected encoder wins (matches the gst_predictor pattern: built
         # once, possibly pretrained, injected read-only). Only build a
-        # default when one is actually needed and none was given.
+        # default when ENCODER mode actually needs one and none was given.
+        # An injected encoder in any other mode would register parameters
+        # that are never used, so it is rejected rather than ignored.
         self.obstacle_encoder = obstacle_encoder
-        if self.obstacle_encoder is None and config.use_obstacle_encoder:
-            self.obstacle_encoder = ObstacleEncoder(
-                ObstacleEncoderConfig(
-                    ray_feature_dim=RAY_FEATURE_DIM,
-                    embedding_dim=config.interaction_embedding_dim,
+        if config.obstacle_mode is ObstacleMode.ENCODER:
+            if self.obstacle_encoder is None:
+                self.obstacle_encoder = ObstacleEncoder(
+                    ObstacleEncoderConfig(
+                        ray_feature_dim=RAY_FEATURE_DIM,
+                        embedding_dim=config.interaction_embedding_dim,
+                    )
+                )
+        elif obstacle_encoder is not None:
+            raise ValueError(
+                f"An obstacle_encoder was injected but obstacle_mode="
+                f"{config.obstacle_mode.name}; only ObstacleMode.ENCODER "
+                f"uses one."
+            )
+
+        self.obstacle_tokenizer: ObstacleTokenizer | None = (
+            ObstacleTokenizer(
+                ObstacleTokenizerConfig(
+                    max_range=config.obstacle_max_range,
+                    hit_radius=config.obstacle_hit_radius,
                 )
             )
+            if config.obstacle_mode is ObstacleMode.POINT_TOKENS
+            else None
+        )
 
         # Down-project only if the encoder's output width doesn't already
         # match interaction_embedding_dim -- the default-constructed
@@ -353,6 +426,9 @@ class CrowdNavPPPolicy(nn.Module):
                 forward, ``0.0`` to reset it (this tick starts a new
                 episode for that environment). Forwarded verbatim to
                 ``RecurrentNodeUpdate``.
+            ray_features: ``[nenv, num_rays, RAY_FEATURE_DIM]`` --
+                ``"ray_features"``, stacked. Required iff
+                ``config.obstacle_mode`` is not ``NONE``.
 
         Returns:
             ``(distribution, value, new_hidden_state)``: ``distribution``
@@ -360,7 +436,20 @@ class CrowdNavPPPolicy(nn.Module):
             1)``, from ``DiagGaussianHead``); ``value`` is ``[nenv, 1]``;
             ``new_hidden_state`` is ``[nenv, rnn_hidden_size]``, to be
             passed back in next tick.
+
+        Raises:
+            ValueError: If ``ray_features`` presence disagrees with
+                ``config.obstacle_mode``.
         """
+        mode = self.config.obstacle_mode
+        if self.config.uses_ray_features and ray_features is None:
+            raise ValueError(
+                f"obstacle_mode={mode.name} but forward() was called "
+                f"without ray_features."
+            )
+        if not self.config.uses_ray_features and ray_features is not None:
+            raise ValueError("ray_features was given but obstacle_mode=NONE.")
+
         neighbor_mask = neighbor_mask.bool()
         neighbor_history_mask = neighbor_history_mask.bool()
 
@@ -389,27 +478,45 @@ class CrowdNavPPPolicy(nn.Module):
                 (neighbor_features, temporal_embedding), dim=-1
             )
 
+        # Token set fed to human-human attention. In POINT_TOKENS mode it
+        # is [real humans | obstacle hits]; humans stay first so that
+        # _substitute_dummy_human's slot 0 is always a human slot.
+        token_features = spatial_edge_features
+        token_mask = neighbor_mask
+        if mode is ObstacleMode.POINT_TOKENS:
+            assert self.obstacle_tokenizer is not None and ray_features is not None
+            human_flag = spatial_edge_features.new_zeros(
+                *spatial_edge_features.shape[:-1], 1
+            )
+            obstacle_geometry, obstacle_hit_mask = self.obstacle_tokenizer.tokenize(
+                ray_features
+            )
+            token_features = torch.cat(
+                (
+                    torch.cat((spatial_edge_features, human_flag), dim=-1),
+                    self._pad_obstacle_tokens(obstacle_geometry),
+                ),
+                dim=1,
+            )
+            token_mask = torch.cat((neighbor_mask, obstacle_hit_mask), dim=1)
+
         # HumanHumanAttention/RobotHumanAttention carry an explicit
         # seq_len axis (see their own docstrings); this policy is
         # single-tick-only (see module docstring), so seq_len is always
         # exactly 1 here -- added before those two calls, squeezed back
         # off immediately after.
-        human_features = spatial_edge_features.unsqueeze(0)
-        visible_mask = neighbor_mask.unsqueeze(0)
+        human_features = token_features.unsqueeze(0)
+        visible_mask = token_mask.unsqueeze(0)
         visible_mask = self._substitute_dummy_human(visible_mask)
 
         human_embeddings = self.human_human_attention(human_features, visible_mask)
         human_embeddings = self._human_embed_down(human_embeddings)
 
+        obstacle_embedding_for_attention = None
         obstacle_mask_for_attention = None
-        if self.config.use_obstacle_encoder:
-            if ray_features is None:
-                raise ValueError(
-                    "config.use_obstacle_encoder=True but forward() was "
-                    "called without ray_features."
-                )
-            assert self.obstacle_encoder is not None
-            # [nenv, num_rays, output_dim] -- one token per ray now, not a
+        if mode is ObstacleMode.ENCODER:
+            assert self.obstacle_encoder is not None and ray_features is not None
+            # [nenv, num_rays, output_dim] -- one token per ray, not a
             # single pooled summary (see ObstacleEncoder module docstring:
             # pooling was confirmed via probe to destroy left/right
             # directional info even untrained).
@@ -420,10 +527,6 @@ class CrowdNavPPPolicy(nn.Module):
             # mask out rays that hit nothing rather than feeding them in as
             # phantom always-visible obstacle tokens.
             obstacle_mask_for_attention = (ray_features[..., 0] > 0.5).unsqueeze(0)
-        elif ray_features is not None:
-            raise ValueError(
-                "ray_features was given but config.use_obstacle_encoder=False."
-            )
 
         robot_embedding = self.robot_encoder(robot_features).unsqueeze(0).unsqueeze(-2)
         crowd_context = self.robot_human_attention(
@@ -480,14 +583,41 @@ class CrowdNavPPPolicy(nn.Module):
         action, log_prob = select_action(distribution, deterministic=deterministic)
         return action, log_prob, value, new_hidden_state
 
+    def _pad_obstacle_tokens(self, obstacle_geometry: Tensor) -> Tensor:
+        """Widen geometric obstacle tokens to ``spatial_edge_feature_dim``.
+
+        Layout matches a human token: ``[geometry(5) | temporal embedding |
+        GST prediction (if enabled) | is_obstacle flag]``. The temporal and
+        GST slots are zero -- ray index has no persistent identity, so no
+        motion history exists, and a static point's predicted displacement
+        is zero. The flag is the only reliable human/obstacle
+        discriminator: hit radius (0.3) equals a nominal pedestrian radius.
+
+        Args:
+            obstacle_geometry: ``[nenv, num_rays, 5]`` from
+                ``ObstacleTokenizer.tokenize``.
+
+        Returns:
+            ``[nenv, num_rays, spatial_edge_feature_dim]``.
+        """
+        nenv, num_rays, _ = obstacle_geometry.shape
+        padding_dim = self.config.temporal_hidden_size
+        if self.config.use_gst_prediction:
+            padding_dim += self.config.gst_pred_length * 2
+        padding = obstacle_geometry.new_zeros(nenv, num_rays, padding_dim)
+        flag = obstacle_geometry.new_ones(nenv, num_rays, 1)
+        return torch.cat((obstacle_geometry, padding, flag), dim=-1)
+
     @staticmethod
     def _substitute_dummy_human(visible_mask: Tensor) -> Tensor:
-        """Force slot 0 visible wherever an environment sees zero neighbors.
+        """Force slot 0 visible wherever an environment sees zero tokens.
 
         See module docstring's "zero visible humans" design decision --
         this is the one place navcore implements the original paper's own
         documented workaround for a fully-masked attention row, rather
-        than letting either attention module crash on it.
+        than letting either attention module crash on it. In
+        ``POINT_TOKENS`` mode the mask covers humans *and* obstacle hits,
+        so the substitution only fires when the robot sees neither.
 
         Caveat, not silently hidden: the substituted slot's *feature*
         vector is left exactly as ObservationEncoder already zero-fills
@@ -500,13 +630,13 @@ class CrowdNavPPPolicy(nn.Module):
         behavior for episodes with sparse crowds).
 
         Args:
-            visible_mask: ``[1, nenv, max_neighbors]``, boolean.
+            visible_mask: ``[1, nenv, num_tokens]``, boolean.
 
         Returns:
             ``visible_mask``, with slot 0 marked visible for any
-            ``(seq, env)`` that had no real visible neighbor. Returned
+            ``(seq, env)`` that had no real visible token. Returned
             unchanged (same object) if every slot already has at least
-            one visible neighbor.
+            one visible token.
         """
         no_humans_visible = ~visible_mask.any(dim=-1)  # [1, nenv]
         if not bool(no_humans_visible.any()):

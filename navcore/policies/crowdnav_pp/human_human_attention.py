@@ -184,17 +184,16 @@ class HumanHumanAttention(nn.Module):
             )
 
         embedded = self.embed(human_features).reshape(batch, max_human_num, -1)
-        # nn.MultiheadAttention (non-batch-first form) is sequence-first:
-        # [max_human_num, batch, embedding_size].
         embedded = embedded.transpose(0, 1)
 
-        # key_padding_mask=True means "ignore this key" in PyTorch's
-        # convention -- the inverse of navcore's neighbor_mask convention
-        # (True means "this is a real neighbor"), hence the negation.
         key_padding_mask = ~flat_mask
 
+        query = self.query_proj(embedded)
+        key = self.key_proj(embedded)
+        value = self.value_proj(embedded)
+
         attended, _ = self.attention(
-            embedded, key=embedded, value=embedded, key_padding_mask=key_padding_mask
+            query, key=key, value=value, key_padding_mask=key_padding_mask
         )
         attended = attended.transpose(0, 1)  # [batch, max_human_num, embedding_size]
         return attended.reshape(

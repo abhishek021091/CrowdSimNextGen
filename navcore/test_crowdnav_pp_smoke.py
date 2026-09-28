@@ -23,7 +23,10 @@ import torch
 
 from navcore.gym_wrapper.crowd_sim_env import ActionMode, CrowdSimEnv, CrowdSimEnvConfig
 from navcore.gym_wrapper.goal_reaching_task import GoalReachingTask
-from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
+from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
+    CrowdNavPPPolicy,
+    CrowdNavPPPolicyConfig,
+)
 
 _CHECKS: list[tuple[str, callable]] = []
 

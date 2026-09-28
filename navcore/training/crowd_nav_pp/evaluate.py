@@ -32,7 +32,10 @@ from navcore.policies.crowdnav_pp.obstacle_encoder import (
     ObstacleEncoder,
     ObstacleEncoderConfig,
 )
-from navcore.policies.crowdnav_pp.policy import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
+from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
+    CrowdNavPPPolicy,
+    CrowdNavPPPolicyConfig,
+)
 from navcore.step.step import Step
 
 _OUTCOMES: tuple[str, ...] = ("success", "collision", "out_of_bounds", "timeout")
