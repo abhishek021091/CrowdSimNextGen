@@ -230,6 +230,21 @@ class CrowdNavPPPolicyConfig:
     obstacle_mode: ObstacleMode = ObstacleMode.NONE
     obstacle_max_range: float = 5.0
     obstacle_hit_radius: float = 0.1
+    use_obstacle_encoder: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.use_obstacle_encoder is not None:
+            if self.use_obstacle_encoder and self.obstacle_mode is ObstacleMode.NONE:
+                object.__setattr__(self, "obstacle_mode", ObstacleMode.ENCODER)
+            elif (
+                not self.use_obstacle_encoder
+                and self.obstacle_mode is ObstacleMode.ENCODER
+            ):
+                object.__setattr__(self, "obstacle_mode", ObstacleMode.NONE)
+        else:
+            object.__setattr__(
+                self, "use_obstacle_encoder", self.obstacle_mode is ObstacleMode.ENCODER
+            )
 
     @property
     def uses_ray_features(self) -> bool:

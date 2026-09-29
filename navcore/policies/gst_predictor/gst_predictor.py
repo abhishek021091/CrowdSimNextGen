@@ -150,12 +150,23 @@ class GSTPredictor(nn.Module):
         )
 
         seq_embeddings = embeddings.transpose(0, 1)  # [N, B, D]
-        key_padding_mask = ~ever_visible
+        # Avoid all-masked rows which cause NaNs in nn.MultiheadAttention when no humans are visible
+        safe_visible = ever_visible.clone()
+        no_humans_visible = ~ever_visible.any(dim=-1)  # [B]
+        if bool(no_humans_visible.any()):
+            safe_visible[no_humans_visible, 0] = True
+        key_padding_mask = ~safe_visible
+
         for layer in self.graph_layers:
             seq_embeddings = layer(seq_embeddings, edge_weights, key_padding_mask)
         embeddings = seq_embeddings.transpose(0, 1)  # [B, N, D]
 
-        return self.head(embeddings)
+        mean, log_var = self.head(embeddings)
+        # Displacements for absent/padding humans must be strictly zero (not arbitrary or dummy values)
+        mask_out = ever_visible.unsqueeze(-1).unsqueeze(-1).to(mean.dtype)
+        mean = mean * mask_out
+        log_var = log_var * mask_out
+        return mean, log_var
 
     @torch.no_grad()
     def predict_features(

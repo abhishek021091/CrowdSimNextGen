@@ -224,9 +224,6 @@ class CrowdNavPPTrainer:
         for _ in range(self.config.n_steps):
             not_done_mask = np.where(self._prev_done, 0.0, 1.0).astype(np.float32)
             obs_t = _to_tensor_batch(self._obs, self.device)
-            print(obs_t["neighbor_history_mask"])
-            print(obs_t["neighbor_history"])
-            print(obs_t["neighbor_mask"])
             not_done_mask_t = torch.as_tensor(
                 not_done_mask, dtype=torch.float32, device=self.device
             )

@@ -130,6 +130,7 @@ def main() -> None:
         CrowdNavPPPolicyConfig(
             use_gst_prediction=args.use_gst_prediction,
             obstacle_mode=obstacle_mode,
+            obstacle_max_range=args.obstacle_max_range,
         ),
         gst_predictor=gst_predictor,
         obstacle_encoder=obstacle_encoder,

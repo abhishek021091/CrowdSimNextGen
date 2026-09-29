@@ -52,12 +52,18 @@ class GraphGatedTransformerLayer(nn.Module):
         bias = torch.log(edge_weights + eps)  # [B, N, N]
         bias = bias.unsqueeze(1).expand(B, num_heads, N, N).reshape(B * num_heads, N, N)
 
+        # Convert boolean key_padding_mask to additive float mask (0.0 for valid, -inf for masked)
+        # to match attn_mask dtype and eliminate PyTorch's mismatched mask deprecation warning.
+        key_padding_mask_float = torch.zeros_like(
+            key_padding_mask, dtype=bias.dtype
+        ).masked_fill(key_padding_mask, float("-inf"))
+
         attended, _ = self.attn(
             embeddings,
             embeddings,
             embeddings,
             attn_mask=bias,
-            key_padding_mask=key_padding_mask,
+            key_padding_mask=key_padding_mask_float,
         )
         embeddings = self.norm1(embeddings + attended)
         embeddings = self.norm2(embeddings + self.ff(embeddings))
