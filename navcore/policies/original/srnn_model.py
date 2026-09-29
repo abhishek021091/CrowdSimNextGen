@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import copy
 
-from rl.networks.network_utils import init
+from navcore.policies.original.network_utils import init
 
 
 class RNNBase(nn.Module):

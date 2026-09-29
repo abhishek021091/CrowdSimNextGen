@@ -22,11 +22,10 @@ def get_render_func(venv):
 
 
 def get_vec_normalize(venv):
-    if isinstance(venv, VecNormalize):
+    if VecNormalize is not None and isinstance(venv, VecNormalize):
         return venv
     elif hasattr(venv, "venv"):
         return get_vec_normalize(venv.venv)
-
     return None
 
 
