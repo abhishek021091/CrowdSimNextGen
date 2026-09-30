@@ -1,44 +1,24 @@
 """CrowdSimNextGen adapter for the official CrowdNav++ policy.
 
-Architecture::
+Architecture (unchanged from the design goal, but the original forward is now
+*reused*, not copied):
 
     navcore observation
-        -> ``_build_inputs``  (observation conversion only)
-             real humans        [B, max_humans, 12]  \\
-                                                      +-- cat --> [B, max_humans + R, 12]
-             obstacle ray hits  [B, R, 12]           /   (pseudo-humans)
-        -> official ``base.forward``  (100% untouched code)
-        -> ``dist``  (official DiagGaussian)
+        -> ``_build_inputs``            (observation conversion only)
+        -> official ``base.forward``    (SpatialEdgeSelfAttn, EdgeAttention_M,
+                                         robot_linear, EndRNN, actor, critic --
+                                         100% untouched code)
+              \\-- forward-pre-hook on ``base.humanNodeRNN`` (EndRNN):
+                   fused = obstacle_fusion([crowd_context || obstacle_context])
+        -> ``dist``                     (official DiagGaussian)
 
-Obstacles are *not* a separate branch. Every obstacle ray becomes one
-pseudo-human slot, laid out exactly like a stationary human: position
-relative to the robot, zero velocity, constant-velocity "future" (= the
-position repeated), so it flows through human embedding, human-human
-attention, robot-human attention, the GRU and the actor/critic heads
-identically to a real human. The network cannot tell them apart.
+Obstacle rays never reach ``spatial_attn``, ``attn``, ``detected_human_num``,
+the human masks or human ordering: they are encoded in ``_encode_obstacles``
+from ``ray_features`` alone and only meet the human pipeline's *output*
+(the 256-d crowd context) inside the hook.
 
-Fixed slot count: a ray that hit nothing keeps its slot as a far-away,
-masked dummy (the same convention already used for padded human slots),
-so ``num slots == max_neighbors + obstacle_num_rays`` at every timestep.
-
-Why ``sort_humans=False``: with ``True`` the official attention treats
-validity as a *prefix length* (``detected_human_num``). Ray hits are
-scattered across the ray array, so their validity is not a prefix. The
-``False`` path takes an arbitrary boolean mask, has no parameters, and is
-identical to the prefix path for prefix masks -- so pretrained weights are
-unaffected.
-
-Known consequences (not bugs):
-    * The official ``EdgeAttention_M`` scales its logits by
-      ``num_slots / sqrt(attention_size)``. More slots => sharper robot-human
-      attention than pretrained weights saw. Weights load; behaviour drifts
-      until fine-tuned.
-    * The official 12-d edge has no radius channel, so ``obstacle_hit_radius``
-      is carried in the 5-d token but dropped here, exactly like real human
-      radii are.
-
-state_dict layout: exactly the official ``base.*`` / ``dist.*`` keys in every
-obstacle mode.
+state_dict layout: ``base.*`` and ``dist.*`` are exactly the official keys;
+the extension adds only ``obstacle_encoder.*`` / ``obstacle_fusion.*``.
 """
 
 from __future__ import annotations
@@ -51,6 +31,7 @@ import torch
 from gymnasium import spaces
 from torch import Tensor, nn
 
+from navcore.entities.components.sensors.obstacle_detector import RAY_FEATURE_DIM
 from navcore.policies.obstacle_mode import ObstacleMode
 
 from .obstacle_tokenizer import ObstacleTokenizer, ObstacleTokenizerConfig
@@ -60,10 +41,10 @@ __all__ = [
     "CrowdNavPPPolicy",
     "CrowdNavPPPolicyConfig",
     "ObstacleMode",
+    "ObstacleTokenEncoder",
     "build_action_space",
     "build_base_args",
     "build_obs_space",
-    "constant_velocity_edges",
 ]
 
 # -- constants dictated by the official CrowdSimPredRealGST-v0 layout ---------
@@ -72,14 +53,15 @@ _PRED_STEPS = 5
 _SPATIAL_EDGE_DIM = 2 * (1 + _PRED_STEPS)
 _ROBOT_NODE_DIM = 7
 _TEMPORAL_EDGE_DIM = 2
+#: Width of robot_linear's output == EndRNN's encoder_linear input.
+_CONTEXT_DIM = 256
 _EDGE_RNN_SIZE = 256
-#: Official env replaces inf padding of spatial edges by 15. Used for every
-#: invalid slot (padded human OR obstacle ray that hit nothing).
+#: Official env replaces inf padding of spatial edges by 15 (as far as I
+#: remember crowd_sim_var_num.py -- verify). Only visible for the dummy human.
 _FAR_AWAY = 15.0
 #: Official GST prediction interval; also used by the constant-velocity fallback.
 _CV_DT = 0.25
-#: Keys written by the removed obstacle side-branch; such checkpoints are rejected.
-_LEGACY_OBSTACLE_PREFIXES = ("obstacle_encoder.", "obstacle_fusion.")
+_OBSTACLE_PREFIXES = ("obstacle_encoder.", "obstacle_fusion.")
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,14 +70,6 @@ class CrowdNavPPPolicyConfig:
 
     Fields marked *unused* are kept for public-API compatibility with the
     from-scratch policy; the official backbone hard-codes those values.
-
-    Attributes:
-        obstacle_num_rays: Number of obstacle pseudo-human slots. Must equal
-            the env's ``obstacle_num_rays``; it fixes the obs-space shape.
-            Only used when ``obstacle_mode`` is ``POINT_TOKENS``.
-        obstacle_hit_radius: Radius stored in obstacle tokens (metres). Has no
-            effect on the official 12-d layout (see module docstring).
-        use_obstacle_encoder: Deprecated alias; ENCODER mode was removed.
     """
 
     robot_feature_dim: int = 8
@@ -116,8 +90,8 @@ class CrowdNavPPPolicyConfig:
     gst_pred_length: int = _PRED_STEPS
     obstacle_mode: ObstacleMode = ObstacleMode.NONE
     obstacle_max_range: float = 5.0
-    obstacle_hit_radius: float = 0.3
-    obstacle_num_rays: int = 60
+    obstacle_hit_radius: float = 0.1  # tokenizer only; 12-d tokens carry no radius
+    obstacle_context_dim: int = 128
     use_obstacle_encoder: bool | None = None
 
     def __post_init__(self) -> None:
@@ -133,15 +107,6 @@ class CrowdNavPPPolicyConfig:
             object.__setattr__(
                 self, "use_obstacle_encoder", self.obstacle_mode is ObstacleMode.ENCODER
             )
-        if self.obstacle_mode is ObstacleMode.ENCODER:
-            raise ValueError(
-                "ObstacleMode.ENCODER was removed from the official-port adapter: "
-                "obstacles are now pseudo-humans (ObstacleMode.POINT_TOKENS)."
-            )
-        if self.obstacle_num_rays <= 0:
-            raise ValueError(
-                f"obstacle_num_rays must be positive, got {self.obstacle_num_rays!r}."
-            )
         if self.use_gst_prediction and self.gst_pred_length != _PRED_STEPS:
             raise ValueError(
                 f"The official 12-d spatial edge requires gst_pred_length="
@@ -153,16 +118,6 @@ class CrowdNavPPPolicyConfig:
         return self.obstacle_mode is not ObstacleMode.NONE
 
     @property
-    def num_obstacle_slots(self) -> int:
-        """Pseudo-human slots appended after the real humans (0 in NONE mode)."""
-        return self.obstacle_num_rays if self.uses_ray_features else 0
-
-    @property
-    def total_slots(self) -> int:
-        """Fixed slot count entering human-human attention."""
-        return self.max_neighbors + self.num_obstacle_slots
-
-    @property
     def spatial_edge_feature_dim(self) -> int:
         return _SPATIAL_EDGE_DIM
 
@@ -172,10 +127,8 @@ def build_base_args(config: CrowdNavPPPolicyConfig) -> types.SimpleNamespace:
 
     ``no_cuda=True`` on purpose: the official ``__init__`` unconditionally
     builds ``dummy_human_mask`` with ``.cuda()`` when ``no_cuda`` is False.
-
-    ``sort_humans=False``: validity is passed as an arbitrary mask instead of a
-    prefix length, which is required because obstacle-ray hits are not a
-    contiguous prefix (see module docstring).
+    With ``sort_humans=True`` that tensor is never read, so this avoids a crash
+    on CPU-only hosts and a stray CUDA tensor that ``.to(device)`` never moves.
     """
     return types.SimpleNamespace(
         human_node_rnn_size=config.rnn_hidden_size,
@@ -192,19 +145,20 @@ def build_base_args(config: CrowdNavPPPolicyConfig) -> types.SimpleNamespace:
         use_self_attn=True,
         use_hr_attn=True,
         env_name="CrowdSimPredRealGST-v0",
-        sort_humans=False,
+        sort_humans=True,
         no_cuda=True,
     )
 
 
 def build_obs_space(config: CrowdNavPPPolicyConfig) -> dict[str, spaces.Box]:
     inf = np.inf
-    slots = config.total_slots
     return {
         "robot_node": spaces.Box(-inf, inf, shape=(1, _ROBOT_NODE_DIM)),
         "temporal_edges": spaces.Box(-inf, inf, shape=(1, _TEMPORAL_EDGE_DIM)),
-        "spatial_edges": spaces.Box(-inf, inf, shape=(slots, _SPATIAL_EDGE_DIM)),
-        "visible_masks": spaces.Box(-inf, inf, shape=(slots,)),
+        "spatial_edges": spaces.Box(
+            -inf, inf, shape=(config.max_neighbors, _SPATIAL_EDGE_DIM)
+        ),
+        "visible_masks": spaces.Box(-inf, inf, shape=(config.max_neighbors,)),
         "detected_human_num": spaces.Box(-inf, inf, shape=(1,)),
     }
 
@@ -213,23 +167,37 @@ def build_action_space(config: CrowdNavPPPolicyConfig) -> spaces.Box:
     return spaces.Box(low=-1.0, high=1.0, shape=(config.action_dim,), dtype=np.float32)
 
 
-def _edges_from_future(rel_pos: Tensor, future: Tensor) -> Tensor:
-    """``[B,N,2]`` + ``[B,N,5,2]`` -> official 12-d edge ``[B,N,12]``."""
-    B, N = rel_pos.shape[:2]
-    return torch.cat((rel_pos, future.reshape(B, N, -1)), dim=-1)
+def masked_mean(features: Tensor, mask: Tensor) -> Tensor:
+    """Mean over dim 1 of ``[B, R, D]`` features where ``mask [B, R]`` is True.
 
-
-def constant_velocity_edges(rel_pos: Tensor, vel: Tensor) -> Tensor:
-    """12-d spatial edges under a constant-velocity assumption.
-
-    Used for humans when GST is off, and for obstacle pseudo-humans always
-    (``vel == 0`` => the future equals the current position).
+    All-False rows give an exact zero vector (numerator is zero, denominator is
+    clamped to 1), so no separate ``has_hits`` gate is needed.
     """
-    steps = torch.arange(1, _PRED_STEPS + 1, device=rel_pos.device, dtype=rel_pos.dtype)
-    future = rel_pos.unsqueeze(2) + vel.unsqueeze(2) * (
-        steps.view(1, 1, -1, 1) * _CV_DT
-    )
-    return _edges_from_future(rel_pos, future)
+    m = mask.unsqueeze(-1).to(features.dtype)
+    return (features * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
+
+
+class ObstacleTokenEncoder(nn.Module):
+    """Per-token MLP + permutation-invariant masked mean over ray hits."""
+
+    def __init__(
+        self,
+        token_dim: int = _SPATIAL_EDGE_DIM,
+        hidden_dim: int = 64,
+        output_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(token_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+            nn.ReLU(),
+        )
+        self.output_dim = output_dim
+
+    def forward(self, obstacle_tokens: Tensor, hit_mask: Tensor) -> Tensor:
+        """``[B, R, token_dim]`` + ``[B, R]`` bool -> ``[B, output_dim]``."""
+        return masked_mean(self.mlp(obstacle_tokens), hit_mask)
 
 
 class _SpatialAttentionView:
@@ -258,21 +226,26 @@ class _ActionHeadView:
 
 
 class CrowdNavPPPolicy(Policy):
-    """Official CrowdNav++ ``Policy`` whose human slots include obstacle hits.
+    """Official CrowdNav++ ``Policy`` + a decoupled obstacle branch.
 
     Attributes:
         config: Adapter hyperparameters.
-        max_humans: Real-human slots (``config.max_neighbors``).
-        num_obstacle_slots: Obstacle pseudo-human slots (0 in NONE mode).
-        obstacle_tokenizer: Ray-hit tokenizer; ``None`` in ``ObstacleMode.NONE``.
+        obstacle_tokenizer / obstacle_encoder / obstacle_fusion: Extension
+            modules; ``None`` in ``ObstacleMode.NONE``.
     """
 
     def __init__(
         self,
         config: CrowdNavPPPolicyConfig | None = None,
         gst_predictor: nn.Module | None = None,
+        obstacle_encoder: nn.Module | None = None,
     ) -> None:
         config = config or CrowdNavPPPolicyConfig()
+        if config.obstacle_mode is ObstacleMode.POINT_TOKENS and obstacle_encoder:
+            raise ValueError(
+                "An obstacle_encoder was injected but obstacle_mode=POINT_TOKENS; "
+                "only ObstacleMode.ENCODER uses an injected obstacle_encoder."
+            )
         if config.use_gst_prediction and gst_predictor is None:
             raise ValueError("use_gst_prediction=True requires a gst_predictor.")
 
@@ -283,8 +256,7 @@ class CrowdNavPPPolicy(Policy):
             base_kwargs=build_base_args(config),
         )
         self.config = config
-        self.max_humans = config.max_neighbors
-        self.num_obstacle_slots = config.num_obstacle_slots
+        self.human_num = config.max_neighbors
         self.gst_predictor = gst_predictor
 
         # Official: human_node_final_linear only serves an auxiliary loss.
@@ -292,12 +264,51 @@ class CrowdNavPPPolicy(Policy):
         self.base.human_node_final_linear.requires_grad_(False)
 
         self.obstacle_tokenizer: ObstacleTokenizer | None = None
+        self.obstacle_encoder: nn.Module | None = None
+        self.obstacle_fusion: nn.Linear | None = None
+        self.obstacle_dim = config.obstacle_context_dim
+        self._pending_obstacle_context: Tensor | None = None
+
         if config.obstacle_mode is ObstacleMode.POINT_TOKENS:
             self.obstacle_tokenizer = ObstacleTokenizer(
                 ObstacleTokenizerConfig(
                     max_range=config.obstacle_max_range,
                     hit_radius=config.obstacle_hit_radius,
                 )
+            )
+            self.obstacle_encoder = ObstacleTokenEncoder(output_dim=self.obstacle_dim)
+        elif config.obstacle_mode is ObstacleMode.ENCODER:
+            if obstacle_encoder is None:
+                from navcore.policies.crowdnav_pp.obstacle_encoder import (
+                    ObstacleEncoder,
+                    ObstacleEncoderConfig,
+                )
+
+                obstacle_encoder = ObstacleEncoder(
+                    ObstacleEncoderConfig(
+                        ray_feature_dim=RAY_FEATURE_DIM, embedding_dim=self.obstacle_dim
+                    )
+                )
+            self.obstacle_encoder = obstacle_encoder
+            self.obstacle_dim = getattr(
+                obstacle_encoder.config,
+                "output_dim",
+                getattr(obstacle_encoder.config, "embedding_dim", self.obstacle_dim),
+            )
+
+        if self.obstacle_encoder is not None:
+            self.obstacle_fusion = nn.Linear(
+                _CONTEXT_DIM + self.obstacle_dim, _CONTEXT_DIM
+            )
+            with torch.no_grad():
+                self.obstacle_fusion.bias.zero_()
+                self.obstacle_fusion.weight[:, :_CONTEXT_DIM] = torch.eye(_CONTEXT_DIM)
+                nn.init.orthogonal_(
+                    self.obstacle_fusion.weight[:, _CONTEXT_DIM:], gain=1.0
+                )
+            # The single extension point into the official forward.
+            self.base.humanNodeRNN.register_forward_pre_hook(
+                self._inject_obstacle_context
             )
 
     # -- adapter views -------------------------------------------------------
@@ -318,74 +329,31 @@ class CrowdNavPPPolicy(Policy):
     # -- checkpoint loading --------------------------------------------------
 
     def load_state_dict(self, state_dict, strict: bool = True, **kwargs):
-        """Load official-layout weights; reject the removed obstacle side-branch."""
+        """Strict load with ONE explicit allowance.
+
+        An official (or pre-obstacle) checkpoint has no ``obstacle_*`` keys. That
+        is tolerated only if *every* obstacle key is absent; a partially present
+        obstacle branch, any other missing key, or any unexpected key raises.
+        Shape mismatches always raise (torch does this even for strict=False).
+        """
         if "policy_state_dict" in state_dict:
             state_dict = state_dict["policy_state_dict"]
-        legacy = sorted(
-            k for k in state_dict if k.startswith(_LEGACY_OBSTACLE_PREFIXES)
-        )
-        if legacy:
-            raise RuntimeError(
-                "Checkpoint contains keys from the removed obstacle side-branch "
-                f"(e.g. {legacy[:3]}); it was trained with a different "
-                "architecture and cannot be loaded."
-            )
-        return super().load_state_dict(state_dict, strict=strict, **kwargs)
+        if strict:
+            expected = set(self.state_dict())
+            given = set(state_dict)
+            missing = expected - given
+            unexpected = given - expected
+            obstacle_keys = {k for k in expected if k.startswith(_OBSTACLE_PREFIXES)}
+            tolerated = obstacle_keys if missing >= obstacle_keys else set()
+            fatal = missing - tolerated
+            if fatal or unexpected:
+                raise RuntimeError(
+                    f"Checkpoint mismatch. missing={sorted(fatal)[:10]} "
+                    f"unexpected={sorted(unexpected)[:10]}"
+                )
+        return super().load_state_dict(state_dict, strict=False, **kwargs)
 
     # -- observation conversion ----------------------------------------------
-
-    def _human_slots(
-        self,
-        neighbors: Tensor,
-        neighbor_mask: Tensor,
-        neighbor_history: Tensor,
-        neighbor_history_mask: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Real humans -> ``(edges [B,max_humans,12], mask [B,max_humans] bool)``.
-
-        Assumes nothing about mask contiguity. Pads/truncates to ``max_humans``.
-        """
-        B, N = neighbors.shape[:2]
-        rel_pos, vel = neighbors[..., 0:2], neighbors[..., 2:4]
-        if self.config.use_gst_prediction:
-            assert self.gst_predictor is not None
-            pred = self.gst_predictor.predict_features(
-                neighbor_history[..., 0:2].transpose(1, 2),
-                neighbor_history[..., 2:4].transpose(1, 2),
-                neighbor_history_mask.transpose(1, 2),
-            ).view(B, N, _PRED_STEPS, 2)
-            edges = _edges_from_future(rel_pos, rel_pos.unsqueeze(2) + pred)
-        else:
-            edges = constant_velocity_edges(rel_pos, vel)
-
-        mask = neighbor_mask.bool()
-        if N < self.max_humans:
-            pad = self.max_humans - N
-            edges = torch.cat((edges, edges.new_zeros(B, pad, _SPATIAL_EDGE_DIM)), 1)
-            mask = torch.cat((mask, mask.new_zeros(B, pad)), 1)
-        else:
-            edges = edges[:, : self.max_humans]
-            mask = mask[:, : self.max_humans]
-        return edges, mask
-
-    def _obstacle_slots(self, ray_features: Tensor) -> tuple[Tensor, Tensor]:
-        """Ray scan -> ``(edges [B,R,12], hit mask [B,R] bool)`` pseudo-humans.
-
-        One slot per ray, in ray order. Rays that hit nothing have zero features
-        and ``mask=False``; ``_build_inputs`` turns them into far-away dummies
-        together with padded human slots.
-        """
-        assert self.obstacle_tokenizer is not None
-        if ray_features.shape[1] != self.num_obstacle_slots:
-            raise ValueError(
-                f"ray_features has {ray_features.shape[1]} rays but the policy was "
-                f"built for obstacle_num_rays={self.num_obstacle_slots}."
-            )
-        tokens, hit = self.obstacle_tokenizer.tokenize(ray_features)
-        # tokens: (rel_px, rel_py, vx=0, vy=0, radius). Radius is dropped here,
-        # like it is for real humans (the official edge has no radius channel).
-        edges = constant_velocity_edges(tokens[..., 0:2], tokens[..., 2:4])
-        return edges, hit
 
     def _build_inputs(
         self,
@@ -394,21 +362,22 @@ class CrowdNavPPPolicy(Policy):
         neighbor_mask: Tensor,
         neighbor_history: Tensor,
         neighbor_history_mask: Tensor,
-        ray_features: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """navcore observation -> official input dict.
+        """navcore observation -> official input dict (humans only).
 
-        ``spatial_edges`` is ``[real humans | obstacle pseudo-humans]`` with a
-        fixed ``config.total_slots`` (=``max_humans + R``) at every call.
+        Assumes ``neighbor_mask`` is a contiguous prefix (nearest first), which
+        is what ObservationEncoder produces and what the official
+        ``sort_humans=True`` path (``detected_human_num`` as a prefix length)
+        requires.
         """
-        B = neighbors.shape[0]
+        B, N = neighbors.shape[:2]
         device, dtype = robot.device, robot.dtype
 
         temporal_edges = robot[:, 2:4].unsqueeze(1)  # (vx, vy)
         zeros = torch.zeros(B, 1, device=device, dtype=dtype)
         theta = torch.atan2(robot[:, 7:8], robot[:, 6:7])
         # (px, py, radius, gx, gy, v_pref, theta). Robot-relative frame:
-        # px = py = 0 and the goal is relative.
+        # px = py = 0 and the goal is relative -- see report (deviation).
         robot_node = torch.cat(
             (
                 zeros,
@@ -422,29 +391,84 @@ class CrowdNavPPPolicy(Policy):
             dim=-1,
         ).unsqueeze(1)
 
-        edges, mask = self._human_slots(
-            neighbors, neighbor_mask, neighbor_history, neighbor_history_mask
-        )
-        if self.obstacle_tokenizer is not None:
-            assert ray_features is not None
-            obs_edges, obs_mask = self._obstacle_slots(ray_features)
-            edges = torch.cat((edges, obs_edges), dim=1)
-            mask = torch.cat((mask, obs_mask), dim=1)
+        rel_pos, vel = neighbors[..., 0:2], neighbors[..., 2:4]
+        if self.config.use_gst_prediction:
+            assert self.gst_predictor is not None
+            pred = self.gst_predictor.predict_features(
+                neighbor_history[..., 0:2].transpose(1, 2),
+                neighbor_history[..., 2:4].transpose(1, 2),
+                neighbor_history_mask.transpose(1, 2),
+            ).view(B, N, _PRED_STEPS, 2)
+            future = rel_pos.unsqueeze(2) + pred
+        else:
+            steps = torch.arange(1, _PRED_STEPS + 1, device=device, dtype=dtype)
+            future = rel_pos.unsqueeze(2) + vel.unsqueeze(2) * (
+                steps.view(1, 1, -1, 1) * _CV_DT
+            )
+        spatial_edges = torch.cat((rel_pos, future.reshape(B, N, -1)), dim=-1)
 
-        # Every invalid slot (padded human or non-hit ray) -> far away; then the
-        # official "at least one visible slot" rule. No .any() -> no GPU sync.
-        edges = torch.where(mask.unsqueeze(-1), edges, edges.new_full((), _FAR_AWAY))
+        mask = neighbor_mask.bool()
+        if N < self.human_num:
+            pad = self.human_num - N
+            spatial_edges = torch.cat(
+                (spatial_edges, spatial_edges.new_zeros(B, pad, _SPATIAL_EDGE_DIM)), 1
+            )
+            mask = torch.cat((mask, mask.new_zeros(B, pad)), 1)
+        else:
+            spatial_edges = spatial_edges[:, : self.human_num]
+            mask = mask[:, : self.human_num]
+
+        # Padding -> far away (official fills inf with 15); then the official
+        # "at least one human" rule. No .any() -> no GPU sync.
+        spatial_edges = torch.where(
+            mask.unsqueeze(-1), spatial_edges, spatial_edges.new_full((), _FAR_AWAY)
+        )
         first = mask[:, :1] | ~mask.any(dim=-1, keepdim=True)
         mask = torch.cat((first, mask[:, 1:]), dim=1)
 
         return {
             "robot_node": robot_node,
             "temporal_edges": temporal_edges,
-            "spatial_edges": edges,
+            "spatial_edges": spatial_edges,
             "visible_masks": mask.to(dtype),
-            # Unused with sort_humans=False; kept for official-input parity.
             "detected_human_num": mask.sum(dim=-1, keepdim=True, dtype=torch.int32),
         }
+
+    # -- obstacle branch (never touches human tensors) -------------------------
+
+    def _encode_obstacles(self, ray_features: Tensor) -> Tensor | None:
+        """``[B, R, 3]`` rays -> ``[1, B, 1, D]`` obstacle context (seq_len=1)."""
+        mode = self.config.obstacle_mode
+        if mode is ObstacleMode.NONE:
+            return None
+        assert self.obstacle_encoder is not None
+        if mode is ObstacleMode.POINT_TOKENS:
+            assert self.obstacle_tokenizer is not None
+            geometry, hit = self.obstacle_tokenizer.tokenize(ray_features)
+            pos = geometry[..., 0:2]
+            # static point: predicted future == current position, x5
+            tokens = torch.cat((pos, pos.repeat(1, 1, _PRED_STEPS)), dim=-1)
+            context = self.obstacle_encoder(tokens, hit)
+        else:
+            hit = ray_features[..., 0] > 0.5
+            context = masked_mean(self.obstacle_encoder(ray_features), hit)
+        return context.unsqueeze(0).unsqueeze(2)
+
+    def _inject_obstacle_context(self, module: nn.Module, args: tuple):
+        """Forward-pre-hook on EndRNN: fuse obstacle context into crowd context.
+
+        EndRNN.forward(robot_s, h_spatial_other, h, masks); only argument 1
+        (the crowd context produced by the untouched human pipeline) is replaced.
+        No-op unless ``forward`` staged a context, so direct ``self.base(...)``
+        calls keep exact official behaviour.
+        """
+        context = self._pending_obstacle_context
+        if context is None:
+            return None
+        robot_states, crowd_context, hidden, masks = args
+        assert self.obstacle_fusion is not None
+        fused = self.obstacle_fusion(torch.cat((crowd_context, context), dim=-1))
+        return robot_states, fused, hidden, masks
 
     # -- policy API ----------------------------------------------------------------
 
@@ -472,7 +496,6 @@ class CrowdNavPPPolicy(Policy):
             neighbor_mask,
             neighbor_history,
             neighbor_history_mask,
-            ray_features,
         )
         # Only sizes of the edge-RNN state are read by the official forward.
         rnn_hxs = {
@@ -481,9 +504,16 @@ class CrowdNavPPPolicy(Policy):
         }
         # Official code fixes nenv at construction (num_processes); we batch freely.
         self.base.nenv = B
-        value, actor_features, new_rnn_hxs = self.base(
-            inputs, rnn_hxs, not_done_mask.reshape(B, 1), infer=True
+        self._pending_obstacle_context = (
+            self._encode_obstacles(ray_features) if ray_features is not None else None
         )
+        try:
+            value, actor_features, new_rnn_hxs = self.base(
+                inputs, rnn_hxs, not_done_mask.reshape(B, 1), infer=True
+            )
+        finally:
+            self._pending_obstacle_context = None
+
         new_hidden = new_rnn_hxs["human_node_rnn"].reshape(B, -1)
         return self.dist(actor_features), value, new_hidden
 
@@ -518,10 +548,10 @@ class CrowdNavPPPolicy(Policy):
 
     def get_value(self, *args, **kwargs):
         raise NotImplementedError(
-            "Use forward()/act(); official-format inputs would skip the obstacle slots."
+            "Use forward()/act(); official-format inputs would skip the obstacle branch."
         )
 
     def evaluate_actions(self, *args, **kwargs):
         raise NotImplementedError(
-            "Use forward(); official-format inputs would skip the obstacle slots."
+            "Use forward(); official-format inputs would skip the obstacle branch."
         )

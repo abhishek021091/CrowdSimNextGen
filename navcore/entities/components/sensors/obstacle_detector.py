@@ -88,7 +88,7 @@ class ObstacleDetectorConfig:
             anything smaller gives a forward-facing cone.
     """
 
-    num_rays: int = 180
+    num_rays: int = 60
     max_range: float = 5.0
     fov_radians: float = 2.0 * math.pi
 

@@ -90,7 +90,7 @@ class EnvSettings:
     history_steps: int = 8
     max_episode_steps: int = 1500
     static_obstacles: bool = False
-    obstacle_num_rays: int = 60
+    obstacle_num_rays: int = 20
     obstacle_max_range: float = 5.0
 
 

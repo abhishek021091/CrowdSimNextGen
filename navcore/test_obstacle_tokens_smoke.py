@@ -31,7 +31,7 @@ from navcore.policies.crowdnav_pp.crowd_nav_pp_policy import (
     ObstacleMode,
 )
 
-NUM_RAYS = 20
+NUM_RAYS = 60
 MAX_NEIGHBORS = 10
 HISTORY_STEPS = 8
 MAX_RANGE = 5.0

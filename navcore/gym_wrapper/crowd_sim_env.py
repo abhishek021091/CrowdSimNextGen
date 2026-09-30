@@ -60,7 +60,7 @@ class CrowdSimEnvConfig:
     robot_visible: bool = False
     include_static_obstacles: bool = True
     orca_config_file: str = "orca.toml"
-    obstacle_num_rays: int = 60
+    obstacle_num_rays: int = 20
     obstacle_max_range: float = 5.0
 
 
