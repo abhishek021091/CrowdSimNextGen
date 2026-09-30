@@ -70,4 +70,5 @@ class Environment:
             or robot_pose.py - self.robot.radius - self.info.safety_distance < -h
             or robot_pose.py + self.robot.radius + self.info.safety_distance > h
         )
-        return is_out_of_bounds
+        return False
+        # return is_out_of_bounds

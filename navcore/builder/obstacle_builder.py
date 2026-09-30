@@ -35,6 +35,8 @@ class ObstacleBuilder:
         self.obstacles: dict[str, Obstacle] = {}
 
     def build_boundary(self) -> None:
+        if self.config["boundary"]["enabled"] is False:
+            return
         gate_config = self.config["boundary"]["gate"]
         gates: list[BoundaryGate] = []
 

@@ -218,9 +218,7 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
             self._setup_visualizer()
 
         if self.render_mode == "human":
-            # Update the on-screen display
-            # self.visualizer.render(self.env)
-            pass
+            self.visualizer.refresh(self.env)
         elif self.render_mode == "rgb_array":
             # Return a numpy array of the frame
             # return self.visualizer.get_rgb_array(self.env)

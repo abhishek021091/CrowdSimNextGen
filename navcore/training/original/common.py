@@ -77,8 +77,8 @@ def resolve_policy_config(
     return dataclasses.replace(base, **overrides)
 
 
-def build_policy(cfg: CrowdNavPPPolicyConfig, device: torch.device) -> CrowdNavPPPolicy:
-    return CrowdNavPPPolicy(cfg).to(device)
+def build_policy(cfg, device, gst_predictor=None):
+    return CrowdNavPPPolicy(cfg, gst_predictor=gst_predictor).to(device)
 
 
 # -- environment ---------------------------------------------------------------------
@@ -139,7 +139,16 @@ def make_env(settings: EnvSettings, render_mode: str | None = None):
     return make_env_class()(GoalReachingTask(), cfg, render_mode=render_mode)
 
 
-def make_vec_env(settings: EnvSettings, n_envs: int):
+def make_vec_env(settings, n_envs, render=False):
     from navcore.training.crowd_nav_pp.vec_env import VecCrowdSimEnv
 
-    return VecCrowdSimEnv([(lambda: make_env(settings)) for _ in range(n_envs)])
+    return VecCrowdSimEnv(
+        [
+            (
+                lambda i=i: make_env(
+                    settings, render_mode="human" if render and i == 0 else None
+                )
+            )
+            for i in range(n_envs)
+        ]
+    )

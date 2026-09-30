@@ -44,7 +44,7 @@ from navcore.training.original.checkpoint import (
     PPO_FORMAT,
     CheckpointInfo,
     config_to_dict,
-    inspect_checkpoint,
+    describe_optimizer_state,
     load_policy_checkpoint,
 )
 
@@ -82,17 +82,34 @@ def _explained_variance(y_pred: Tensor, y_true: Tensor) -> float:
         return float("nan")
     return float(1.0 - torch.var(y_true - y_pred) / var_y)
 
+def _f(v: float | None, spec: str = ".3f") -> str:
+    """Format a number, rendering None/NaN/inf as 'n/a'."""
+    if v is None or not math.isfinite(v):
+        return "n/a"
+    return format(v, spec)
+
+
+def _hms(seconds: float) -> str:
+    if not math.isfinite(seconds) or seconds < 0:
+        return "n/a"
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
 
 class OriginalPPOTrainer:
     def __init__(
         self,
         env,
         policy,
-        config: PPOConfig | None = None,
+        config=None,
         *,
         writer=None,
-        metrics_path: str | Path | None = None,
+        metrics_path=None,
+        render: bool = False,
+        seed: int | None = None,
     ) -> None:
+
         mode = getattr(getattr(env, "config", None), "action_mode", None)
         if getattr(mode, "value", mode) != "velocity":
             raise ValueError("OriginalPPOTrainer requires ActionMode.VELOCITY.")
@@ -126,6 +143,14 @@ class OriginalPPOTrainer:
         self.total_steps = 0
         self.total_updates = 0
         self.best_eval_score: tuple[float, float] | None = None
+        self.render = render
+        self.seed = seed
+
+        if self._obs is None:
+            self._obs = self.env.reset(seed=self.seed)
+
+        if self.render:
+            self.env.render()
 
     # -- helpers ---------------------------------------------------------------
 
@@ -235,6 +260,8 @@ class OriginalPPOTrainer:
             "episodes_completed": float(n),
             "mean_episode_reward": float(np.mean(ep_rewards)) if n else nan,
             "std_episode_reward": float(np.std(ep_rewards)) if n else nan,
+            "min_episode_reward": float(np.min(ep_rewards)) if n else nan,
+            "max_episode_reward": float(np.max(ep_rewards)) if n else nan,
             "mean_episode_length": float(np.mean(ep_lengths)) if n else nan,
         }
         for k, c in outcomes.items():
@@ -398,15 +425,14 @@ class OriginalPPOTrainer:
             if self.metrics_logger:
                 self.metrics_logger.log(self.total_steps, {**rs, **us})
             if self.total_updates % log_every == 0:
-                el = time.time() - t0
                 print(
-                    f"update={self.total_updates} steps={self.total_steps}/{total_timesteps} "
-                    f"sps={(self.total_steps - s0) / max(el, 1e-9):.0f} lr={lr:.2e} | "
-                    f"ep={int(rs['episodes_completed'])} succ={rs['success_rate']:.2f} "
-                    f"coll={rs['collision_rate']:.2f} R={rs['mean_episode_reward']:.2f} | "
-                    f"pl={us['policy_loss']:.4f} vl={us['value_loss']:.3f} ent={us['entropy']:.3f} "
-                    f"kl={us['approx_kl']:.4f} clip={us['clip_fraction']:.2f} "
-                    f"ev={us['explained_variance']:.2f} gn={us['grad_norm']:.2f}",
+                    self._format_update(
+                        rs,
+                        us,
+                        total_timesteps,
+                        elapsed=time.time() - t0,
+                        steps_this_run=self.total_steps - s0,
+                    ),
                     flush=True,
                 )
             if (
@@ -466,13 +492,14 @@ class OriginalPPOTrainer:
         Any other format is accepted as weights-only with a warning. Envs are
         reset and hidden states zeroed (they are not checkpointed).
         """
-        _, info = inspect_checkpoint(path)
-        info = load_policy_checkpoint(self.policy, path)
+        info = load_policy_checkpoint(self.policy, path)  # prints full report
+        optimizer_restored = False
         if info.format == "ppo":
             ck = torch.load(path, map_location="cpu", weights_only=True)
             if "optimizer_state_dict" in ck:
                 try:
                     self.optimizer.load_state_dict(ck["optimizer_state_dict"])
+                    optimizer_restored = True
                 except ValueError as e:
                     warnings.warn(
                         f"Optimizer state not restored ({e}); fresh Adam state."
@@ -483,9 +510,50 @@ class OriginalPPOTrainer:
             warnings.warn(
                 f"{path} is a {info.format!r} checkpoint: weights loaded, counters/optimizer fresh."
             )
+        print(describe_optimizer_state(info, optimizer_restored))
         self._obs = None
         self._prev_done = np.ones(self.n_envs, dtype=bool)
         self._hidden = self.policy.initial_hidden_state(
             nenv=self.n_envs, device=self.device
         )
         return info
+
+    def _format_update(
+        self,
+        rs: dict[str, float],
+        us: dict[str, float],
+        total_timesteps: int,
+        elapsed: float,
+        steps_this_run: int,
+    ) -> str:
+        sps = steps_this_run / max(elapsed, 1e-9)
+        remaining = max(total_timesteps - self.total_steps, 0)
+        eta = remaining / sps if sps > 0 else float("nan")
+        pct = 100.0 * self.total_steps / max(total_timesteps, 1)
+        return "\n".join(
+            [
+                f"update={self.total_updates} "
+                f"steps={self.total_steps:,}/{total_timesteps:,} ({pct:.1f}%) "
+                f"elapsed={_hms(elapsed)} sps={sps:.0f} eta={_hms(eta)} "
+                f"lr={us['lr']:.2e}",
+                f"  episodes={int(rs['episodes_completed'])} "
+                f"success={_f(rs['success_rate'], '.1%')} "
+                f"collision={_f(rs['collision_rate'], '.1%')} "
+                f"oob={_f(rs['out_of_bounds_rate'], '.1%')} "
+                f"timeout={_f(rs['timeout_rate'], '.1%')}",
+                f"  reward: mean={_f(rs['mean_episode_reward'], '.2f')} "
+                f"std={_f(rs['std_episode_reward'], '.2f')} "
+                f"min={_f(rs['min_episode_reward'], '.2f')} "
+                f"max={_f(rs['max_episode_reward'], '.2f')} "
+                f"| ep_len mean={_f(rs['mean_episode_length'], '.1f')}",
+                f"  loss: policy={_f(us['policy_loss'], '.4f')} "
+                f"value={_f(us['value_loss'], '.3f')} "
+                f"entropy={_f(us['entropy'], '.3f')}",
+                f"  ppo: approx_kl={_f(us['approx_kl'], '.4f')} "
+                f"clip_frac={_f(us['clip_fraction'], '.3f')} "
+                f"grad_norm={_f(us['grad_norm'], '.2f')} "
+                f"expl_var={_f(us['explained_variance'], '.3f')} "
+                f"action_std={_f(us['action_std_mean'], '.3f')} "
+                f"opt_iters={int(us['optimizer_iterations'])}",
+            ]
+        )

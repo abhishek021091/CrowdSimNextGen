@@ -1,6 +1,6 @@
 import torch.nn.functional as F
 
-from .srnn_model import *
+from navcore.policies.original.srnn_model import *
 
 
 class SpatialEdgeSelfAttn(nn.Module):

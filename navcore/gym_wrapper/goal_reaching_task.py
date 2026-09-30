@@ -35,11 +35,11 @@ class GoalReachingTask:
 
     def __init__(
         self,
-        collision_penalty: float = -25.0,
-        out_bound_penalty: float = -25.0,
-        goal_bonus: float = 50.0,
-        step_penalty: float = -0.01,
-        progress_weight: float = 5.0,
+        collision_penalty: float = -10.0,
+        out_bound_penalty: float = 0.0,
+        goal_bonus: float = 10.0,
+        step_penalty: float = 0.0,
+        progress_weight: float = 2.0,
     ) -> None:
         self.collision_penalty = collision_penalty
         self.out_bound_penalty = out_bound_penalty
@@ -71,13 +71,6 @@ class GoalReachingTask:
             reward += self.out_bound_penalty
         if self._reached_goal(env):
             reward += self.goal_bonus
-        # if distance < 1.0:
-        #     print(
-        #         f"dist={distance:.3f}, "
-        #         f"progress={progress:.3f}, "
-        #         f"reward={reward:.3f}, "
-        #         f"goal={self._reached_goal(env)}"
-        #     )
         return reward
 
     def is_terminated(

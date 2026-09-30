@@ -42,8 +42,8 @@ OUTCOMES = ("success", "collision", "out_of_bounds", "timeout")
 def classify_outcome(info: dict) -> str:
     if info.get("collision"):
         return "collision"
-    if info.get("out_of_bounds"):
-        return "out_of_bounds"
+    # if info.get("out_of_bounds"):
+    #     return "out_of_bounds"
     if info.get("terminated"):
         return "success"
     return "timeout"

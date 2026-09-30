@@ -59,6 +59,48 @@ _BASE_MODULE_NAMES = (
     "human_node_final_linear.",
 )
 
+_RULE = "=" * 58
+_GST_PREFIX = "gst_predictor."
+
+#: (state_dict prefix, display name). Used only for reporting.
+_MODULE_NAMES: tuple[tuple[str, str], ...] = (
+    ("base.spatial_attn", "human_human_attention"),
+    ("base.attn", "robot_human_attention"),
+    ("base.spatial_linear", "spatial_embedding"),
+    ("base.robot_linear", "robot_encoder"),
+    ("base.humanNodeRNN", "recurrent_encoder"),
+    ("base.actor", "actor"),
+    ("base.critic", "critic"),
+    ("base.critic_linear", "critic_head"),
+    ("base.human_node_final_linear", "aux_head (frozen)"),
+    ("dist", "action_head"),
+    ("obstacle_encoder", "obstacle_encoder"),
+    ("obstacle_fusion", "obstacle_fusion"),
+    ("gst_predictor", "gst_predictor"),
+)
+
+_PPO_CONFIG_KEYS = (
+    "obstacle_mode",
+    "max_neighbors",
+    "use_gst_prediction",
+    "obstacle_max_range",
+    "rnn_hidden_size",
+    "node_output_size",
+    "action_dim",
+)
+
+
+def module_of(key: str) -> str:
+    """Map a state_dict key to its major component name (reporting only)."""
+    for prefix, name in _MODULE_NAMES:
+        if key == prefix or key.startswith(prefix + "."):
+            return name
+    return key.split(".", 1)[0]
+
+
+def _rows(rows, width: int = 17) -> list[str]:
+    return ["" if r is None else f"{r[0]:<{width}}: {r[1]}" for r in rows]
+
 
 @dataclass
 class CheckpointInfo:
@@ -75,14 +117,135 @@ class CheckpointInfo:
     policy_config: dict[str, Any] | None = None
     missing_keys: list[str] = field(default_factory=list)
     unexpected_keys: list[str] = field(default_factory=list)
+    load_report: LoadReport | None = None
 
     def summary(self) -> str:
-        return (
-            f"{self.path}: format={self.format} layout={self.weights_layout} "
-            f"obstacle_mode={self.obstacle_mode.name} wrapped={self.wrapped} "
-            f"steps={self.total_steps} missing={len(self.missing_keys)} "
-            f"unexpected={len(self.unexpected_keys)}"
-        )
+        loaded = self.load_report is not None
+        rows = [
+            ("Path", self.path),
+            ("Format", self.format),
+            ("Weights layout", self.weights_layout),
+            ("Obstacle mode", self.obstacle_mode.name),
+            ("Wrapped", self.wrapped),
+            None,
+            ("Optimizer", "Yes" if self.has_optimizer else "No"),
+            ("Training steps", self.total_steps),
+            ("Updates", self.total_updates),
+            None,
+            ("Missing keys", len(self.missing_keys) if loaded else "n/a (not loaded)"),
+            (
+                "Unexpected keys",
+                len(self.unexpected_keys) if loaded else "n/a (not loaded)",
+            ),
+        ]
+        return "\n".join([_RULE, "Checkpoint", _RULE, *_rows(rows), _RULE])
+
+
+class CheckpointShapeError(RuntimeError):
+    """Tensor present in checkpoint and model, but with different shapes."""
+
+
+@dataclass(slots=True, frozen=True)
+class ShapeMismatch:
+    key: str
+    checkpoint: tuple[int, ...]
+    model: tuple[int, ...]
+
+
+@dataclass(slots=True)
+class LoadReport:
+    """Pure bookkeeping about one checkpoint -> policy load (no torch state).
+
+    Attributes:
+        missing_keys: Model keys absent from the checkpoint (excluding GST
+            keys, which ``load_policy_checkpoint`` keeps at current values).
+        kept_keys: GST keys absent from the checkpoint and kept as-is.
+        unexpected_keys: Checkpoint keys the model does not have.
+        loaded_numel / random_numel / total_numel: Counted by element
+            count. ``random_numel`` = everything not taken from the file.
+        module_status: component name -> (tensors from checkpoint, tensors in model).
+    """
+
+    checkpoint_tensors: int
+    model_tensors: int
+    matched_tensors: int
+    missing_keys: list[str]
+    kept_keys: list[str]
+    unexpected_keys: list[str]
+    loaded_numel: int
+    random_numel: int
+    total_numel: int
+    module_status: dict[str, tuple[int, int]]
+
+    @property
+    def loaded_ratio(self) -> float:
+        return self.loaded_numel / self.total_numel if self.total_numel else 0.0
+
+    @property
+    def loaded_modules(self) -> list[str]:
+        return [m for m, (l, t) in self.module_status.items() if l == t]
+
+    @property
+    def fresh_modules(self) -> list[str]:
+        return [m for m, (l, _) in self.module_status.items() if l == 0]
+
+    @property
+    def partial_modules(self) -> list[str]:
+        return [m for m, (l, t) in self.module_status.items() if 0 < l < t]
+
+
+def find_shape_mismatches(
+    model_sd: Mapping[str, torch.Tensor], ckpt_sd: Mapping[str, torch.Tensor]
+) -> list[ShapeMismatch]:
+    return [
+        ShapeMismatch(k, tuple(ckpt_sd[k].shape), tuple(v.shape))
+        for k, v in model_sd.items()
+        if k in ckpt_sd and tuple(ckpt_sd[k].shape) != tuple(v.shape)
+    ]
+
+
+def format_shape_mismatches(path: str, mismatches: list[ShapeMismatch]) -> str:
+    blocks = [f"Shape mismatch while loading {path}", ""]
+    for m in mismatches:
+        blocks += [
+            m.key,
+            "",
+            "Checkpoint:",
+            str(m.checkpoint),
+            "",
+            "Model:",
+            str(m.model),
+            "",
+        ]
+    return "\n".join(blocks).rstrip()
+
+
+def build_load_report(
+    model_sd: Mapping[str, torch.Tensor], ckpt_sd: Mapping[str, torch.Tensor]
+) -> LoadReport:
+    """Diff key sets and count parameters. Call only after the shape check."""
+    kept = [k for k in model_sd if k.startswith(_GST_PREFIX) and k not in ckpt_sd]
+    kept_set = set(kept)
+    matched = [k for k in model_sd if k in ckpt_sd]
+    status: dict[str, tuple[int, int]] = {}
+    for k in model_sd:
+        name = module_of(k)
+        got, total = status.get(name, (0, 0))
+        status[name] = (got + (k in ckpt_sd), total + 1)
+    total_numel = sum(v.numel() for v in model_sd.values())
+    loaded_numel = sum(model_sd[k].numel() for k in matched)
+    return LoadReport(
+        checkpoint_tensors=len(ckpt_sd),
+        model_tensors=len(model_sd),
+        matched_tensors=len(matched),
+        missing_keys=[k for k in model_sd if k not in ckpt_sd and k not in kept_set],
+        kept_keys=kept,
+        unexpected_keys=[k for k in ckpt_sd if k not in model_sd],
+        loaded_numel=loaded_numel,
+        random_numel=total_numel - loaded_numel,
+        total_numel=total_numel,
+        module_status=status,
+    )
 
 
 # -- default pretrained checkpoint --------------------------------------------
@@ -273,15 +436,17 @@ def inspect_checkpoint(
 
 
 def load_policy_checkpoint(
-    policy: nn.Module, path: str | os.PathLike, strict: bool = True
+    policy: nn.Module,
+    path: str | os.PathLike,
+    strict: bool = True,
+    verbose: bool = True,
 ) -> CheckpointInfo:
     """Load weights from any supported format into ``policy``.
 
-    Missing ``obstacle_*`` keys are tolerated (all-or-nothing, enforced by the
-    adapter's ``load_state_dict``) so an official checkpoint can initialise an
-    obstacle-enabled policy; those modules then keep their fresh init.
-    Loading an obstacle checkpoint into a policy of a *different* obstacle
-    mode raises.
+    Pipeline: inspect -> obstacle-mode check (unchanged ValueError) ->
+    shape check (detailed CheckpointShapeError) -> key diff -> load ->
+    ``validate_checkpoint``. Missing ``obstacle_*`` keys are still tolerated
+    all-or-nothing by the adapter's ``load_state_dict``.
     """
     sd, info = inspect_checkpoint(path)
     policy_mode = policy.config.obstacle_mode
@@ -294,15 +459,268 @@ def load_policy_checkpoint(
             f"policy is {policy_mode.name}. Use --obstacle-mode {info.obstacle_mode.value} "
             f"(or 'auto' when evaluating)."
         )
+
+    model_sd = policy.state_dict()
+    mismatches = find_shape_mismatches(model_sd, sd)
+    if mismatches:
+        raise CheckpointShapeError(format_shape_mismatches(str(path), mismatches))
+
+    report = build_load_report(model_sd, sd)
+    info.missing_keys = list(report.missing_keys)
+    info.unexpected_keys = list(report.unexpected_keys)
+    info.load_report = report
+
     # The adapter registers gst_predictor as a submodule; official checkpoints
     # never contain its keys, so keep the policy's current values for them.
-    for k, v in policy.state_dict().items():
-        if k.startswith("gst_predictor.") and k not in sd:
-            sd[k] = v
-    result = policy.load_state_dict(sd, strict=strict)
+    for k in report.kept_keys:
+        sd[k] = model_sd[k]
+
+    try:
+        result = policy.load_state_dict(sd, strict=strict)
+    except RuntimeError:
+        if verbose:  # show exact key names before the exception propagates
+            print(
+                "\n".join(
+                    [
+                        info.summary(),
+                        "",
+                        *_key_section("Missing keys", report.missing_keys),
+                        *_key_section("Unexpected keys", report.unexpected_keys),
+                    ]
+                )
+            )
+        raise
     info.missing_keys = list(getattr(result, "missing_keys", []))
     info.unexpected_keys = list(getattr(result, "unexpected_keys", []))
+    validate_checkpoint(policy, info, report, verbose=verbose)
     return info
+
+
+# -- reporting ---------------------------------------------------------------
+
+
+def _key_section(title: str, keys: list[str]) -> list[str]:
+    return [title, "", *([f"  {k}" for k in keys] or ["  (none)"]), ""]
+
+
+def _explain_missing(info: CheckpointInfo, report: LoadReport) -> list[str]:
+    lines: list[str] = []
+    obstacle = sorted(
+        {module_of(k) for k in report.missing_keys if k.startswith(OBSTACLE_PREFIXES)}
+    )
+    if obstacle:
+        lines += [
+            "Checkpoint does not contain obstacle weights.",
+            "",
+            "The following modules are randomly initialized:",
+            "",
+            *[f"- {m}" for m in obstacle],
+            "",
+            "Training will continue using pretrained CrowdNav weights plus "
+            "newly initialized obstacle modules.",
+            "",
+        ]
+    if report.kept_keys:
+        lines += [
+            "Checkpoint does not contain GST predictor weights.",
+            "",
+            "gst_predictor keeps its current values (pretrained only if you "
+            "loaded one via GSTPredictorTrainer.load_predictor; otherwise random).",
+            "",
+        ]
+    other = sorted(
+        {
+            module_of(k)
+            for k in report.missing_keys
+            if not k.startswith(OBSTACLE_PREFIXES)
+        }
+    )
+    if other:
+        lines += [
+            "Other modules missing from the checkpoint (randomly initialized):",
+            "",
+            *[f"- {m}" for m in other],
+            "",
+        ]
+    if report.unexpected_keys:
+        lines += [
+            "The checkpoint holds tensors this policy has no slot for; they were ignored.",
+            "",
+        ]
+    return lines
+
+
+def _obstacle_compat(info: CheckpointInfo, policy_mode: ObstacleMode) -> list[str]:
+    ck = info.obstacle_mode
+    if ck is ObstacleMode.NONE and policy_mode is not ObstacleMode.NONE:
+        return [
+            "Checkpoint contains no obstacle branch.",
+            "",
+            "Obstacle modules will use fresh initialization.",
+        ]
+    if ck is not ObstacleMode.NONE and ck is policy_mode:
+        return [f"Obstacle branch ({ck.name}) restored from checkpoint."]
+    return ["Obstacle branch: not used by checkpoint or policy."]
+
+
+def _ppo_block(info: CheckpointInfo) -> list[str]:
+    cfg = info.policy_config
+    rows: list = [
+        ("Training steps", info.total_steps),
+        ("Training updates", info.total_updates),
+    ]
+    lines = ["PPO checkpoint", "", *_rows(rows), "", "Policy configuration"]
+    if not cfg:
+        return [*lines, "  not stored in this checkpoint", ""]
+    for k in _PPO_CONFIG_KEYS:
+        if k in cfg:
+            lines.append(f"  {k:<19}: {cfg[k]}")
+    # Not part of policy_config or of the checkpoint format, so it cannot be reported.
+    lines += ["  history_steps      : not stored in checkpoint (env setting)", ""]
+    return lines
+
+
+def _collect_warnings(
+    policy: nn.Module, info: CheckpointInfo, report: LoadReport
+) -> list[str]:
+    warns: list[str] = []
+    if report.loaded_numel == 0:
+        warns.append("No parameters were loaded from this checkpoint.")
+    for m in sorted(
+        {
+            module_of(k)
+            for k in report.missing_keys
+            if not k.startswith(OBSTACLE_PREFIXES)
+        }
+    ):
+        warns.append(
+            f"Module '{m}' is missing from the checkpoint and randomly initialized."
+        )
+    if report.unexpected_keys:
+        warns.append(
+            f"{len(report.unexpected_keys)} unexpected checkpoint tensors were ignored."
+        )
+    if info.format == "ppo" and not info.has_optimizer:
+        warns.append("PPO checkpoint has no optimizer state.")
+    saved, cfg = info.policy_config or {}, getattr(policy, "config", None)
+    if saved and cfg is not None:
+        for name in ("max_neighbors", "use_gst_prediction"):
+            if (
+                name in saved
+                and hasattr(cfg, name)
+                and saved[name] != getattr(cfg, name)
+            ):
+                warns.append(
+                    f"Saved {name}={saved[name]!r} differs from the policy's {getattr(cfg, name)!r}."
+                )
+        mode = getattr(cfg, "obstacle_mode", None)
+        if (
+            "obstacle_mode" in saved
+            and mode is not None
+            and saved["obstacle_mode"] != mode.name
+        ):
+            warns.append(
+                f"Saved obstacle_mode={saved['obstacle_mode']} differs from the policy's {mode.name}."
+            )
+    return warns
+
+
+def validate_checkpoint(
+    policy: nn.Module,
+    info: CheckpointInfo,
+    report: LoadReport,
+    verbose: bool = True,
+) -> list[str]:
+    """Print a full post-load report and return the list of warnings."""
+    warns = _collect_warnings(policy, info, report)
+    out: list[str] = [info.summary(), ""]
+    if info.format == "ppo":
+        out += _ppo_block(info)
+    out += [
+        "Tensors",
+        "",
+        *_rows(
+            [
+                ("Checkpoint", report.checkpoint_tensors),
+                ("Model", report.model_tensors),
+                ("Matched", report.matched_tensors),
+                ("Missing", len(report.missing_keys)),
+                ("Unexpected", len(report.unexpected_keys)),
+            ]
+        ),
+        "",
+        "Parameters (by element count)",
+        "",
+        *_rows(
+            [
+                ("Loaded", f"{report.loaded_numel:,}"),
+                ("Random init", f"{report.random_numel:,}"),
+                ("Total", f"{report.total_numel:,}"),
+                None,
+                ("Loaded ratio", f"{report.loaded_ratio:.2%}"),
+            ]
+        ),
+        "",
+        *_key_section("Missing keys", report.missing_keys),
+        *_key_section("Unexpected keys", report.unexpected_keys),
+        *_explain_missing(info, report),
+        "Loaded modules",
+        "",
+        *[f"  ✓ {m}" for m in report.loaded_modules],
+        "",
+        "Fresh initialization",
+        "",
+        *([f"  • {m}" for m in report.fresh_modules] or ["  (none)"]),
+    ]
+    if report.partial_modules:
+        out += [
+            "",
+            "Partially loaded",
+            "",
+            *[
+                f"  ~ {m} ({report.module_status[m][0]}/{report.module_status[m][1]} tensors)"
+                for m in report.partial_modules
+            ],
+        ]
+    out += [
+        "",
+        *_obstacle_compat(info, policy.config.obstacle_mode),
+        "",
+        f"Optimizer state in file: {'yes' if info.has_optimizer else 'no'}",
+    ]
+    if warns:
+        out += ["", "Warnings", "", *[f"  ! {w}" for w in warns]]
+    out.append(_RULE)
+    if verbose:
+        print("\n".join(out))
+    return warns
+
+
+def describe_optimizer_state(info: CheckpointInfo, restored: bool | None) -> str:
+    """Explain what happened to optimizer state.
+
+    ``restored``: True/False after a resume attempt; None when only weights
+    were loaded (``--checkpoint`` / evaluation).
+    """
+    if restored:
+        return (
+            "Optimizer state restored.\n"
+            "Training will resume exactly where it stopped.\n"
+            "(Environments and recurrent hidden states are re-initialised; "
+            "they are not checkpointed.)"
+        )
+    if info.has_optimizer and restored is None:
+        return (
+            "Optimizer state is present but was not restored (weights-only load).\n"
+            "Use --resume to continue training exactly where it stopped."
+        )
+    if info.has_optimizer:
+        return "Optimizer state could not be restored.\nAdam optimizer will start from scratch."
+    return (
+        "Optimizer state not found.\n\n"
+        "Adam optimizer will start from scratch.\n"
+        "Learning-rate schedule restarts."
+    )
 
 
 # -- config (de)serialisation for PPO checkpoints --------------------------------
