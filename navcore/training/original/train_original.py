@@ -19,8 +19,10 @@ from navcore.training.original.common import (
     make_vec_env,
     pick_device,
     resolve_policy_config,
+    resolve_ray_spec,  # new
     resolve_static_obstacles,
     set_global_seed,
+    verify_ray_wiring,  # new
 )
 from navcore.training.original.original_trainer import (  # was: original_ppo_trainer
     OriginalPPOTrainer,
@@ -75,8 +77,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     p.add_argument("--static-obstacles", choices=["auto", "on", "off"], default="auto")
-    p.add_argument("--obstacle-num-rays", type=int, default=60)
-    p.add_argument("--obstacle-max-range", type=float, default=None)
+    p.add_argument(
+        "--obstacle-num-rays",
+        type=int,
+        default=None,
+        help="Override env.toml [obstacle_sensor].num_rays",
+    )
+    p.add_argument(
+        "--obstacle-max-range",
+        type=float,
+        default=None,
+        help="Override env.toml [obstacle_sensor].max_range",
+    )
     p.add_argument("--obstacle-hit-radius", type=float, default=None)
     p.add_argument("--use-gst-prediction", action="store_true")
     p.add_argument("--gst-checkpoint", type=str, default=None)
@@ -131,10 +143,12 @@ def main() -> None:
     if source:
         _, info = inspect_checkpoint(source)
 
+    ray_spec = resolve_ray_spec(args.obstacle_num_rays, args.obstacle_max_range)
+
     policy_cfg = resolve_policy_config(
         obstacle_mode=args.obstacle_mode,
         max_neighbors=args.max_neighbors,
-        obstacle_max_range=args.obstacle_max_range,
+        ray_spec=ray_spec,
         checkpoint_info=info,
         obstacle_hit_radius=args.obstacle_hit_radius,
     )
@@ -160,8 +174,7 @@ def main() -> None:
         history_steps=args.history_steps,
         max_episode_steps=args.max_episode_steps,
         static_obstacles=resolve_static_obstacles(args.static_obstacles, policy_cfg),
-        obstacle_num_rays=args.obstacle_num_rays,
-        obstacle_max_range=policy_cfg.obstacle_max_range,
+        ray_spec=ray_spec,
     )
     if settings.static_obstacles and not policy_cfg.uses_ray_features:
         warnings.warn(
@@ -170,6 +183,7 @@ def main() -> None:
 
     env = make_vec_env(settings, args.n_envs, render=args.render)
     policy = build_policy(policy_cfg, device, gst_predictor=gst_predictor)
+    verify_ray_wiring(env, policy)
 
     if args.checkpoint:
         info = load_policy_checkpoint(policy, args.checkpoint)  # prints report

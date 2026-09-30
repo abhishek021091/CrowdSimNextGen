@@ -54,11 +54,13 @@ class CollisionChecker:
                 [agent_pose.px - ped_pose.px, agent_pose.py - ped_pose.py]
             )
             if distance < (
-                self.agent.radius + ped.radius + self.env.info.safety_distance
+                self.agent.radius
+                + ped.radius
+                + self.env.info.pedestrian_safety_distance
             ):
                 return True
 
-        effective_radius = self.agent.radius + self.env.info.safety_distance
+        effective_radius = self.agent.radius + self.env.info.obstacle_safety_distance
 
         for obstacle in self.env.obstacles.values():
             if isinstance(obstacle.geometry, Circle):
@@ -66,11 +68,7 @@ class CollisionChecker:
                 distance = np.linalg.norm(
                     [agent_pose.px - center.x, agent_pose.py - center.y]
                 )
-                if distance < (
-                    self.agent.radius
-                    + obstacle.geometry.radius
-                    + self.env.info.safety_distance
-                ):
+                if distance < (obstacle.geometry.radius + effective_radius):
                     return True
 
             elif isinstance(obstacle.geometry, Rectangle):
@@ -86,10 +84,7 @@ class CollisionChecker:
 
                 dx = agent_pose.px - closest_x
                 dy = agent_pose.py - closest_y
-                if (dx * dx + dy * dy) <= (
-                    (effective_radius + self.env.info.safety_distance)
-                    * (effective_radius + self.env.info.safety_distance)
-                ):
+                if (dx * dx + dy * dy) <= (effective_radius * effective_radius):
                     return True
 
             elif isinstance(obstacle.geometry, Polygon):
@@ -100,12 +95,9 @@ class CollisionChecker:
                 )
                 if obstacle.id == "boundary":
                     inside = point_in_geometry(point, obstacle.geometry)
-                    if (
-                        not inside
-                        or nearest <= effective_radius + self.env.info.safety_distance
-                    ):
+                    if not inside or nearest <= effective_radius:
                         return True
-                elif nearest <= effective_radius + self.env.info.safety_distance:
+                elif nearest <= effective_radius:
                     return True
 
         return False

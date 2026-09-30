@@ -138,7 +138,9 @@ class RobotBuilder:
         robot's radius nor the safety distance is ever randomized.
         """
         robot_radius = float(Robot.config["physical"]["radius"])
-        safety_distance = float(RobotBuilder.env_config["safety"]["distance"])
+        safety_distance = (
+            float(RobotBuilder.env_config["safety"]["obstacle_distance"]) + 0.1
+        )
         return robot_radius + safety_distance
 
     @staticmethod

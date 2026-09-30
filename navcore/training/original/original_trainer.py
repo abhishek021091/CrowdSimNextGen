@@ -30,9 +30,10 @@ import os
 import time
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
+import pickle
+import warnings
 from typing import Callable
-
+from pathlib import Path
 import numpy as np
 import torch
 from torch import Tensor
@@ -81,6 +82,7 @@ def _explained_variance(y_pred: Tensor, y_true: Tensor) -> float:
     if var_y.item() == 0.0:
         return float("nan")
     return float(1.0 - torch.var(y_true - y_pred) / var_y)
+
 
 def _f(v: float | None, spec: str = ".3f") -> str:
     """Format a number, rendering None/NaN/inf as 'n/a'."""
@@ -495,7 +497,14 @@ class OriginalPPOTrainer:
         info = load_policy_checkpoint(self.policy, path)  # prints full report
         optimizer_restored = False
         if info.format == "ppo":
-            ck = torch.load(path, map_location="cpu", weights_only=True)
+            try:
+                ck = torch.load(path, map_location="cpu", weights_only=True)
+            except pickle.UnpicklingError:
+                warnings.warn(
+                    "weights_only loading failed; retrying with full pickle. "
+                    "Only do this for trusted checkpoints."
+                )
+                ck = torch.load(path, map_location="cpu", weights_only=False)
             if "optimizer_state_dict" in ck:
                 try:
                     self.optimizer.load_state_dict(ck["optimizer_state_dict"])

@@ -14,13 +14,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+from shapely.geometry import Point
 from torch.distributions import Normal
 
+from navcore.entities.agents.robot import Robot
+from navcore.entities.obstacles.geometry_conversion import (
+    arena_boundary_ring,
+    obstacle_to_shapely_polygon,
+)
+from navcore.step.step import Step
 from navcore.training.original.checkpoint import (
     inspect_checkpoint,
     load_policy_checkpoint,
@@ -104,6 +112,54 @@ class VideoRecorder:
         print(f"[video] wrote {self.frames} frames to {self.path}")
 
 
+DEGENERATE_STEPS = 2  # episodes this short ended at spawn, not through behaviour
+
+
+def _stats(values: list[float]) -> dict[str, float]:
+    if not values:
+        nan = float("nan")
+        return dict.fromkeys(("mean", "std", "min", "p10", "p50", "p90", "max"), nan)
+    a = np.asarray(values, dtype=np.float64)
+    return {
+        "mean": float(a.mean()),
+        "std": float(a.std()) if len(a) > 1 else 0.0,
+        "min": float(a.min()),
+        "p10": float(np.percentile(a, 10)),
+        "p50": float(np.percentile(a, 50)),
+        "p90": float(np.percentile(a, 90)),
+        "max": float(a.max()),
+    }
+
+
+def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson interval for a rate; with n=50 the error bar is large."""
+    if n == 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+def _tick_geometry(base, polys, ring) -> tuple[float, float, bool]:
+    """(min pedestrian surface separation, min obstacle/wall clearance, hit_ped)."""
+    robot = base.robot
+    px, py = robot.pose.px, robot.pose.py
+    min_ped = float("inf")
+    for ped in base.crowd.values():
+        if ped.pose is None:
+            continue
+        sep = math.hypot(px - ped.pose.px, py - ped.pose.py) - robot.radius - ped.radius
+        min_ped = min(min_ped, sep)
+    pt = Point(px, py)
+    clear = pt.distance(ring) - robot.radius
+    for poly in polys:
+        clear = min(clear, pt.distance(poly) - robot.radius)
+    # Same criterion CollisionChecker uses for pedestrians.
+    return min_ped, clear, min_ped < base.info.pedestrian_safety_distance
+
+
 @torch.no_grad()
 def evaluate(
     policy,
@@ -127,20 +183,40 @@ def evaluate(
     sync = (
         (lambda: torch.cuda.synchronize()) if device.type == "cuda" else (lambda: None)
     )
+    v_max = float(Robot.config["kinematics"]["v_pref"])
 
-    episodes = []
-    policy_time = 0.0
-    policy_calls = 0
+    episodes: list[dict] = []
+    policy_time, policy_calls, total_steps = 0.0, 0, 0
     wall0 = time.perf_counter()
-    total_steps = 0
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
         hidden = policy.initial_hidden_state(nenv=1, device=device)
-        not_done = torch.zeros(1, device=device)  # first tick resets hidden state
-        ep_reward, steps, info = 0.0, 0, {}
-        done = False
+        not_done = torch.zeros(1, device=device)
+
+        base = env.env
+        polys = [
+            obstacle_to_shapely_polygon(o)
+            for k, o in base.obstacles.items()
+            if k != "boundary"
+        ]
+        ring = arena_boundary_ring(base)
+        robot = base.robot
+        start_dist = math.hypot(
+            robot.goal.gx - robot.pose.px, robot.goal.gy - robot.pose.py
+        )
+        start_ped_sep, start_clear, _ = _tick_geometry(base, polys, ring)
+        prev = (robot.pose.px, robot.pose.py)
+
+        ep_reward, steps, info, done = 0.0, 0, {}, False
+        path_len = 0.0
+        min_ped, min_clear = float("inf"), float("inf")
+        tick_ped_mins: list[float] = []
+        cmd_speeds: list[float] = []
+        saturated = 0
+        hit_ped = False
         record = recorder is not None and ep < video_episodes
+
         while not done:
             batch = {
                 k: torch.as_tensor(v, dtype=torch.float32, device=device).unsqueeze(0)
@@ -166,59 +242,223 @@ def evaluate(
             policy_calls += 1
             not_done = torch.ones(1, device=device)
 
-            obs, reward, terminated, truncated, info = env.step(
-                action.squeeze(0).float().cpu().numpy()
-            )
+            action_np = action.squeeze(0).float().cpu().numpy()
+            speed = math.hypot(float(action_np[0]), float(action_np[1]))
+            cmd_speeds.append(speed)
+            saturated += speed > v_max + 1e-9
+
+            obs, reward, terminated, truncated, info = env.step(action_np)
             ep_reward += float(reward)
             steps += 1
             done = terminated or truncated
+
+            base = env.env
+            pose = base.robot.pose
+            path_len += math.hypot(pose.px - prev[0], pose.py - prev[1])
+            prev = (pose.px, pose.py)
+            tick_ped, tick_clear, hit_ped = _tick_geometry(base, polys, ring)
+            if math.isfinite(tick_ped):
+                min_ped = min(min_ped, tick_ped)
+                tick_ped_mins.append(tick_ped)
+            min_clear = min(min_clear, tick_clear)
+
             if record and steps % video_every == 0:
-                recorder.add(env.env, ep, steps)
+                recorder.add(base, ep, steps)
             if live_viz is not None:
-                live_viz.refresh(env.env)
+                live_viz.refresh(base)
+
         total_steps += steps
         outcome = classify_outcome(info)
-        episodes.append(
-            {"outcome": outcome, "reward": ep_reward, "steps": steps, "seed": seed + ep}
+        robot = env.env.robot
+        final_dist = math.hypot(
+            robot.goal.gx - robot.pose.px, robot.goal.gy - robot.pose.py
         )
+        cause = None
+        if outcome == "collision":
+            cause = "pedestrian" if hit_ped else "obstacle_or_wall"
+
+        rec = {
+            "outcome": outcome,
+            "collision_cause": cause,
+            "degenerate": steps <= DEGENERATE_STEPS,
+            "reward": ep_reward,
+            "steps": steps,
+            "seed": seed + ep,
+            "start_distance": start_dist,
+            "final_distance": final_dist,
+            "path_length": path_len,
+            "path_efficiency": (start_dist / path_len) if path_len > 1e-6 else None,
+            "time_to_goal": steps * Step.dt if outcome == "success" else None,
+            "start_ped_separation": start_ped_sep
+            if math.isfinite(start_ped_sep)
+            else None,
+            "start_obstacle_clearance": start_clear,
+            "min_ped_separation": min_ped if math.isfinite(min_ped) else None,
+            "mean_ped_separation": float(np.mean(tick_ped_mins))
+            if tick_ped_mins
+            else None,
+            "min_obstacle_clearance": min_clear,
+            "mean_commanded_speed": float(np.mean(cmd_speeds)),
+            "mean_actual_speed": path_len / (steps * Step.dt),
+            "saturation_rate": saturated / steps,
+        }
+        episodes.append(rec)
         if verbose:
             print(
-                f"episode {ep:3d}: {outcome:13s} steps={steps:4d} reward={ep_reward:8.2f}",
+                f"ep {ep:3d} seed={rec['seed']:<4d} {outcome:9s}"
+                f"{'/' + cause if cause else '':<18s} steps={steps:4d} "
+                f"R={ep_reward:7.2f} dist {start_dist:5.1f}->{final_dist:5.1f} "
+                f"path={path_len:6.1f} min_ped={min_ped:6.2f} "
+                f"min_obs={min_clear:6.2f}{'  [degenerate]' if rec['degenerate'] else ''}",
                 flush=True,
             )
 
     wall = time.perf_counter() - wall0
-    n = max(len(episodes), 1)
-    rewards = [e["reward"] for e in episodes]
-    lengths = [e["steps"] for e in episodes]
-    report = {
-        "episodes": len(episodes),
-        "deterministic": deterministic,
-        **{f"{o}_rate": sum(e["outcome"] == o for e in episodes) / n for o in OUTCOMES},
-        "mean_reward": float(np.mean(rewards)) if rewards else float("nan"),
-        "std_reward": float(np.std(rewards)) if rewards else float("nan"),
-        "mean_length": float(np.mean(lengths)) if lengths else float("nan"),
-        "inference_fps": policy_calls / policy_time
-        if policy_time > 0
-        else float("nan"),
-        "end_to_end_fps": total_steps / wall if wall > 0 else float("nan"),
-        "per_episode": episodes,
-    }
+    report = _build_report(
+        episodes, deterministic, policy_calls, policy_time, total_steps, wall
+    )
     if was_training:
         policy.train()
     return report
 
 
+def _build_report(
+    episodes, deterministic, policy_calls, policy_time, total_steps, wall
+):
+    n = max(len(episodes), 1)
+    nan = float("nan")
+
+    def vals(key, where=lambda e: True):
+        return [e[key] for e in episodes if where(e) and e[key] is not None]
+
+    def rate(group):
+        g = [e for e in group]
+        m = max(len(g), 1)
+        return {o: sum(e["outcome"] == o for e in g) / m for o in OUTCOMES}
+
+    valid = [e for e in episodes if not e["degenerate"]]
+    successes = [e for e in episodes if e["outcome"] == "success"]
+    lo, hi = _wilson(len(successes), len(episodes))
+    causes = {
+        c: sum(e["collision_cause"] == c for e in episodes)
+        for c in ("pedestrian", "obstacle_or_wall")
+    }
+    valid_rates = rate(valid)
+
+    return {
+        # -- top-level scalars (consumed by train_original's eval hook) --
+        "episodes": len(episodes),
+        "deterministic": deterministic,
+        **{f"{o}_rate": sum(e["outcome"] == o for e in episodes) / n for o in OUTCOMES},
+        "mean_reward": float(np.mean(vals("reward"))) if episodes else nan,
+        "std_reward": float(np.std(vals("reward"))) if episodes else nan,
+        "mean_length": float(np.mean(vals("steps"))) if episodes else nan,
+        "inference_fps": policy_calls / policy_time if policy_time > 0 else nan,
+        "end_to_end_fps": total_steps / wall if wall > 0 else nan,
+        # -- new --
+        "success_rate_ci95": [lo, hi],
+        "degenerate_episodes": len(episodes) - len(valid),
+        "rates_excluding_degenerate": valid_rates,
+        "collision_causes": causes,
+        "reward": _stats(vals("reward")),
+        "reward_by_outcome": {
+            o: _stats(vals("reward", lambda e, o=o: e["outcome"] == o))
+            for o in OUTCOMES
+        },
+        "steps": _stats(vals("steps")),
+        "path_length": _stats(vals("path_length")),
+        "start_distance": _stats(vals("start_distance")),
+        "final_distance_by_outcome": {
+            o: _stats(vals("final_distance", lambda e, o=o: e["outcome"] == o))
+            for o in ("collision", "timeout")
+        },
+        "time_to_goal_s": _stats(vals("time_to_goal")),
+        "path_efficiency_success": _stats(
+            vals("path_efficiency", lambda e: e["outcome"] == "success")
+        ),
+        "separation": {
+            "ped_min_ever": min(vals("min_ped_separation"), default=nan),
+            "ped_episode_min": _stats(vals("min_ped_separation")),
+            "ped_episode_mean": _stats(vals("mean_ped_separation")),
+            "obstacle_clearance_episode_min": _stats(vals("min_obstacle_clearance")),
+            "close_call_rate_ped_lt_0.2m": sum(
+                (e["min_ped_separation"] or 9) < 0.2 and e["outcome"] != "collision"
+                for e in episodes
+            )
+            / n,
+        },
+        "policy_behavior": {
+            "mean_commanded_speed": float(np.mean(vals("mean_commanded_speed"))),
+            "mean_actual_speed": float(np.mean(vals("mean_actual_speed"))),
+            "mean_saturation_rate": float(np.mean(vals("saturation_rate"))),
+        },
+        "per_episode": episodes,
+    }
+
+
 def print_report(r: dict) -> None:
-    print(
-        f"\nepisodes: {r['episodes']}  ({'deterministic' if r['deterministic'] else 'stochastic'})"
-    )
+    def row(label, b):
+        print(
+            f"  {label:<26} mean={b['mean']:8.2f} p10={b['p10']:8.2f} "
+            f"p50={b['p50']:8.2f} p90={b['p90']:8.2f} min={b['min']:8.2f} max={b['max']:8.2f}"
+        )
+
+    mode = "deterministic" if r["deterministic"] else "stochastic"
+    print(f"\nepisodes: {r['episodes']} ({mode})")
+    lo, hi = r["success_rate_ci95"]
+    print("\noutcomes:")
     for o in OUTCOMES:
-        print(f"  {o + ' rate':<20} {r[o + '_rate']:.1%}")
-    print(f"  {'mean reward':<20} {r['mean_reward']:.2f} (std {r['std_reward']:.2f})")
-    print(f"  {'mean episode length':<20} {r['mean_length']:.1f} steps")
-    print(f"  {'inference FPS':<20} {r['inference_fps']:.0f} (policy forward only)")
-    print(f"  {'end-to-end FPS':<20} {r['end_to_end_fps']:.0f} (policy + simulator)")
+        extra = f"  (95% CI {lo:.0%}-{hi:.0%})" if o == "success" else ""
+        print(f"  {o:<14} {r[o + '_rate']:6.1%}{extra}")
+    c = r["collision_causes"]
+    print(
+        f"  collisions by cause: pedestrian={c['pedestrian']}  obstacle/wall={c['obstacle_or_wall']}"
+    )
+    if r["degenerate_episodes"]:
+        v = r["rates_excluding_degenerate"]
+        print(
+            f"\n  !! {r['degenerate_episodes']} degenerate episode(s) (<= {DEGENERATE_STEPS} steps: "
+            f"spawn collision or spawn-at-goal). Excluding them:\n"
+            f"     success={v['success']:.1%} collision={v['collision']:.1%} "
+            f"timeout={v['timeout']:.1%}"
+        )
+
+    print("\nreward:")
+    row("overall", r["reward"])
+    for o in OUTCOMES:
+        if r[o + "_rate"] > 0:
+            row(f"| {o}", r["reward_by_outcome"][o])
+
+    print("\nepisode shape:")
+    row("steps", r["steps"])
+    row("start_distance (m)", r["start_distance"])
+    row("path_length (m)", r["path_length"])
+    row("time_to_goal (s, success)", r["time_to_goal_s"])
+    row("path_efficiency (success)", r["path_efficiency_success"])
+    for o, b in r["final_distance_by_outcome"].items():
+        if r[o + "_rate"] > 0:
+            row(f"final_dist on {o} (m)", b)
+
+    s = r["separation"]
+    print("\nsafety:")
+    print(f"  min pedestrian separation ever : {s['ped_min_ever']:.3f} m")
+    row("ped sep, episode min", s["ped_episode_min"])
+    row("ped sep, episode mean", s["ped_episode_mean"])
+    row("obstacle clearance, min", s["obstacle_clearance_episode_min"])
+    print(
+        f"  close calls (<0.2 m, no collision): {s['close_call_rate_ped_lt_0.2m']:.1%}"
+    )
+
+    b = r["policy_behavior"]
+    print("\npolicy behaviour:")
+    print(
+        f"  commanded speed {b['mean_commanded_speed']:.3f} m/s | "
+        f"actual {b['mean_actual_speed']:.3f} m/s | saturation {b['mean_saturation_rate']:.1%}"
+    )
+    print(
+        f"\nspeed: inference {r['inference_fps']:.0f} FPS (policy only), "
+        f"{r['end_to_end_fps']:.0f} FPS end-to-end"
+    )
 
 
 def main(argv=None) -> int:

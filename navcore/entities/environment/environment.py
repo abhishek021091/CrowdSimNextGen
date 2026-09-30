@@ -23,7 +23,8 @@ class EnvironmentInfo:
     random_seed: int = env_config["random"]["seed"]
     collision_counter: int = 0
     goal_reach_tolerance: float = env_config["tolerance"]["goal_reach"]
-    safety_distance: float = env_config["safety"]["distance"]
+    pedestrian_safety_distance: float = env_config["safety"]["pedestrian_distance"]
+    obstacle_safety_distance: float = env_config["safety"]["obstacle_distance"]
 
 
 @dataclass
@@ -65,10 +66,13 @@ class Environment:
         if robot_pose is None:
             raise RuntimeError("Robot pose has not been initialized.")
         is_out_of_bounds = (
-            robot_pose.px - self.robot.radius - self.info.safety_distance < -w
-            or robot_pose.px + self.robot.radius + self.info.safety_distance > w
-            or robot_pose.py - self.robot.radius - self.info.safety_distance < -h
-            or robot_pose.py + self.robot.radius + self.info.safety_distance > h
+            robot_pose.px - self.robot.radius - self.info.obstacle_safety_distance < -w
+            or robot_pose.px + self.robot.radius + self.info.obstacle_safety_distance
+            > w
+            or robot_pose.py - self.robot.radius - self.info.obstacle_safety_distance
+            < -h
+            or robot_pose.py + self.robot.radius + self.info.obstacle_safety_distance
+            > h
         )
         return False
         # return is_out_of_bounds
