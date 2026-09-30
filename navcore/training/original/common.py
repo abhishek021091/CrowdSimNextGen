@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import dataclasses
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import torch
 
+from navcore.entities.components.sensors.ray_spec import (
+    RaySpec,
+    check_ray_counts,
+    check_ray_specs,
+    default_ray_spec,
+)
 from navcore.policies.obstacle_mode import ObstacleMode
 from navcore.policies.original.adapter import CrowdNavPPPolicy, CrowdNavPPPolicyConfig
 from navcore.training.original.checkpoint import CheckpointInfo, config_from_dict
@@ -36,6 +42,60 @@ def pick_device(name: str | None) -> torch.device:
     return dev
 
 
+# -- ray configuration -------------------------------------------------------------
+
+
+def resolve_ray_spec(num_rays: int | None, max_range: float | None) -> RaySpec:
+    """The ONLY place a CLI override touches the ray configuration."""
+    return default_ray_spec().with_overrides(num_rays=num_rays, max_range=max_range)
+
+
+def verify_ray_wiring(env, policy, *, verbose: bool = True) -> RaySpec:
+    """Fail fast (with component names + values) if any part disagrees on the ray fan."""
+    base_env = env.envs[0] if hasattr(env, "envs") else env
+    enc, cfg = base_env._obs_encoder, policy.config
+    specs = {
+        "CrowdSimEnvConfig.ray_spec": base_env.config.ray_spec,
+        "ObstacleDetector.config": enc.obstacle_detector.config.spec,
+        "ObservationEncoder.ray_spec": enc.ray_spec,
+        "CrowdNavPPPolicy.config.ray_spec": cfg.ray_spec,
+    }
+    tok = getattr(policy, "obstacle_tokenizer", None)
+    if tok is not None and tok.config.num_rays is not None:
+        specs["ObstacleTokenizer.config"] = RaySpec(
+            tok.config.num_rays, tok.config.max_range
+        )
+    check_ray_specs(specs, context="verify_ray_wiring")
+
+    ref = base_env.config.ray_spec.num_rays
+    counts = {
+        "RaySpec (shared)": ref,
+        "ObservationEncoder.space['ray_features']": enc.space["ray_features"].shape[0],
+        "env.observation_space['ray_features']": env.observation_space[
+            "ray_features"
+        ].shape[0],
+    }
+    if cfg.uses_ray_features and hasattr(policy, "max_humans"):
+        counts["policy.num_obstacle_slots"] = cfg.num_obstacle_slots
+        counts["policy.base.human_num - max_neighbors"] = (
+            policy.base.human_num - policy.max_humans
+        )
+    check_ray_counts(counts, context="verify_ray_wiring")
+
+    if verbose:
+        print(
+            "[ray-config] source of truth: env.toml [obstacle_sensor] (+ single CLI override)"
+        )
+        for name, s in specs.items():
+            print(
+                f"[ray-config]   {name:<34} num_rays={s.num_rays:<4} max_range={s.max_range}"
+            )
+        for name, n in counts.items():
+            print(f"[ray-config]   {name:<42} {n}")
+        print(f"[ray-config] OK: all components agree on {ref} rays")
+    return base_env.config.ray_spec
+
+
 # -- policy ------------------------------------------------------------------------
 
 
@@ -43,11 +103,15 @@ def resolve_policy_config(
     *,
     obstacle_mode: str | None,
     max_neighbors: int | None,
-    obstacle_max_range: float | None,
+    ray_spec: RaySpec,
     checkpoint_info: CheckpointInfo | None = None,
     obstacle_hit_radius: float | None = None,
 ) -> CrowdNavPPPolicyConfig:
-    """CLI value wins; else the checkpoint's weights/config; else defaults."""
+    """CLI value wins; else the checkpoint's weights/config; else defaults.
+
+    ``ray_spec`` is always the caller's (env-owned) spec; it is never restored
+    from a checkpoint.
+    """
     meta = checkpoint_info.policy_config if checkpoint_info else None
     base = (
         config_from_dict(CrowdNavPPPolicyConfig, meta)
@@ -67,11 +131,13 @@ def resolve_policy_config(
     else:
         mode = ObstacleMode.NONE
 
-    overrides: dict[str, Any] = {"obstacle_mode": mode, "use_obstacle_encoder": None}
+    overrides: dict[str, Any] = {
+        "obstacle_mode": mode,
+        "use_obstacle_encoder": None,
+        "ray_spec": ray_spec,
+    }
     if max_neighbors is not None:
         overrides["max_neighbors"] = max_neighbors
-    if obstacle_max_range is not None:
-        overrides["obstacle_max_range"] = obstacle_max_range
     if obstacle_hit_radius is not None:
         overrides["obstacle_hit_radius"] = obstacle_hit_radius
     return dataclasses.replace(base, **overrides)
@@ -90,8 +156,7 @@ class EnvSettings:
     history_steps: int = 8
     max_episode_steps: int = 1500
     static_obstacles: bool = False
-    obstacle_num_rays: int = 20
-    obstacle_max_range: float = 5.0
+    ray_spec: RaySpec = field(default_factory=default_ray_spec)
 
 
 def resolve_static_obstacles(arg: str, cfg: CrowdNavPPPolicyConfig) -> bool:
@@ -104,13 +169,7 @@ def make_env_class():
     from navcore.gym_wrapper.crowd_sim_env import CrowdSimEnv
 
     class SeededCrowdSimEnv(CrowdSimEnv):
-        """CrowdSimEnv whose ``Step`` RNG is seeded.
-
-        ``Step`` builds ``np.random.default_rng()`` unseeded, and uses it to
-        randomly freeze pedestrians (1%/tick), which makes replays diverge.
-        We reseed it after every reset from the env's own (gym-seeded)
-        ``np_random`` stream -- no change to existing files needed.
-        """
+        """CrowdSimEnv whose ``Step`` RNG is seeded (see original docstring)."""
 
         def reset(self, *, seed=None, options=None):
             obs, info = super().reset(seed=seed, options=options)
@@ -133,8 +192,7 @@ def make_env(settings: EnvSettings, render_mode: str | None = None):
         history_steps=settings.history_steps,
         max_episode_steps=settings.max_episode_steps,
         include_static_obstacles=settings.static_obstacles,
-        obstacle_num_rays=settings.obstacle_num_rays,
-        obstacle_max_range=settings.obstacle_max_range,
+        ray_spec=settings.ray_spec,
     )
     return make_env_class()(GoalReachingTask(), cfg, render_mode=render_mode)
 

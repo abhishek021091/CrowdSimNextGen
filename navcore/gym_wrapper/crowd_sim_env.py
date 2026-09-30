@@ -24,7 +24,7 @@ scripts.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -36,6 +36,7 @@ from navcore.builder.environment_builder import EnvironmentBuilder
 from navcore.entities.agents.robot import Robot
 from navcore.entities.components.geometry.vector2 import Vector2
 from navcore.entities.components.sensors.obstacle_detector import ObstacleDetectorConfig
+from navcore.entities.components.sensors.ray_spec import RaySpec, default_ray_spec
 from navcore.entities.components.velocity import Velocity
 from navcore.entities.environment.environment import Environment
 from navcore.gym_wrapper.observation_encoder import ObservationEncoder
@@ -62,6 +63,17 @@ class CrowdSimEnvConfig:
     orca_config_file: str = "orca.toml"
     obstacle_num_rays: int = 20
     obstacle_max_range: float = 5.0
+    ray_spec: RaySpec = field(
+        default_factory=default_ray_spec
+    )  # replaces obstacle_num_rays / obstacle_max_range
+
+    @property
+    def obstacle_num_rays(self) -> int:
+        return self.ray_spec.num_rays  # read-only compat
+
+    @property
+    def obstacle_max_range(self) -> float:
+        return self.ray_spec.max_range  # read-only compat
 
 
 class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
@@ -98,11 +110,9 @@ class CrowdSimEnv(gym.Env[dict[str, Any], ActionMode]):
         self._obs_encoder = ObservationEncoder(
             max_neighbors=self.config.max_neighbors,
             history_steps=self.config.history_steps,
-            obstacle_detector_config=ObstacleDetectorConfig(
-                num_rays=self.config.obstacle_num_rays,
-                max_range=self.config.obstacle_max_range,
-            ),
+            ray_spec=self.config.ray_spec,
         )
+        self.ray_spec = self._obs_encoder.ray_spec
         self._waypoint_mission: RLWaypointMission | None = None
         self._step_driver: Step | None = None
         self._velocity_override: Velocity | None = None

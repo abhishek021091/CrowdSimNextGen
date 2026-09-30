@@ -45,6 +45,7 @@ import torch
 from torch import Tensor
 
 from navcore.entities.components.sensors.obstacle_detector import RAY_FEATURE_DIM
+from navcore.entities.components.sensors.ray_spec import check_ray_counts
 
 _HIT_CHANNEL = 0
 _DX_CHANNEL = 1
@@ -53,22 +54,9 @@ _DY_CHANNEL = 2
 
 @dataclass(slots=True, frozen=True)
 class ObstacleTokenizerConfig:
-    """Parameters for :class:`ObstacleTokenizer`.
-
-    Attributes:
-        max_range: The ``ObstacleDetectorConfig.max_range`` the scans were
-            cast with; used to convert normalized hit offsets back to meters.
-        hit_radius: Radius assigned to every hit token, in meters.
-    """
-
     max_range: float
-    hit_radius: float = 0.1
-
-    def __post_init__(self) -> None:
-        if self.max_range <= 0.0:
-            raise ValueError(f"max_range must be positive, got {self.max_range!r}.")
-        if self.hit_radius <= 0.0:
-            raise ValueError(f"hit_radius must be positive, got {self.hit_radius!r}.")
+    hit_radius: float = 0.001
+    num_rays: int | None = None  # when set, tokenize() enforces it
 
 
 class ObstacleTokenizer:
@@ -98,10 +86,13 @@ class ObstacleTokenizer:
         Raises:
             ValueError: If the last dimension is not ``RAY_FEATURE_DIM``.
         """
-        if ray_features.shape[-1] != RAY_FEATURE_DIM:
-            raise ValueError(
-                f"ray_features' last dim is {ray_features.shape[-1]}, expected "
-                f"RAY_FEATURE_DIM={RAY_FEATURE_DIM}."
+        if self.config.num_rays is not None:
+            check_ray_counts(
+                {
+                    "ObstacleTokenizer.config.num_rays": self.config.num_rays,
+                    "ray_features (observation)": ray_features.shape[-2],
+                },
+                context="ObstacleTokenizer.tokenize",
             )
 
         mask = ray_features[..., _HIT_CHANNEL] > 0.5

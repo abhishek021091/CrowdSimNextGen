@@ -26,6 +26,12 @@ from navcore.entities.obstacles.geometry_conversion import (
     arena_boundary_ring,
     obstacle_to_shapely_polygon,
 )
+from navcore.entities.components.sensors.ray_spec import (
+    RaySpec,
+    check_ray_specs,
+    default_ray_spec,
+)
+
 
 _NEIGHBOR_FEATURES = 5
 _ROBOT_FEATURES = 8
@@ -44,9 +50,10 @@ class ObservationEncoder:
 
     def __init__(
         self,
-        max_neighbors: int,
-        history_steps: int = 8,
+        max_neighbors,
+        history_steps=8,
         obstacle_detector_config: ObstacleDetectorConfig | None = None,
+        ray_spec: RaySpec | None = None,
     ) -> None:
         if max_neighbors <= 0:
             raise ValueError(f"max_neighbors must be positive, got {max_neighbors!r}.")
@@ -56,7 +63,20 @@ class ObservationEncoder:
         self.history_steps = history_steps
         self._neighbor_history: dict[int, deque[np.ndarray]] = {}
 
+        if obstacle_detector_config is not None and ray_spec is not None:
+            check_ray_specs(
+                {
+                    "ObservationEncoder(ray_spec=)": ray_spec,
+                    "ObservationEncoder(obstacle_detector_config=)": obstacle_detector_config.spec,
+                },
+                context="ObservationEncoder.__init__",
+            )
+        if obstacle_detector_config is None:
+            obstacle_detector_config = ObstacleDetectorConfig.from_spec(
+                ray_spec or default_ray_spec()
+            )
         self.obstacle_detector = ObstacleDetector(obstacle_detector_config)
+        self.ray_spec: RaySpec = obstacle_detector_config.spec
         # Static per-episode obstacle/boundary geometry, in world-frame
         # shapely form -- built once per episode (see reset()), not
         # every encode() call. Obstacles are static within an episode

@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from navcore.entities.components.sensors.ray_spec import check_ray_specs
 from navcore.gym_wrapper.crowd_sim_env import CrowdSimEnv
 
 
@@ -40,6 +41,11 @@ class VecCrowdSimEnv:
         self.observation_space = self.envs[0].observation_space
         self.action_space = self.envs[0].action_space
         self.config = self.envs[0].config
+        self.ray_spec = self.envs[0].ray_spec
+        check_ray_specs(
+            {f"envs[{i}].ray_spec": e.ray_spec for i, e in enumerate(self.envs)},
+            context="VecCrowdSimEnv",
+        )
 
     def reset(self, seed: int | None = None) -> dict[str, np.ndarray]:
         obs_list = []

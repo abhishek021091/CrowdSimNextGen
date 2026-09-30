@@ -32,8 +32,10 @@ from navcore.training.original.common import (
     make_env,
     pick_device,
     resolve_policy_config,
+    resolve_ray_spec,  # new
     resolve_static_obstacles,
     set_global_seed,
+    verify_ray_wiring,  # new
 )
 
 OUTCOMES = ("success", "collision", "out_of_bounds", "timeout")
@@ -237,8 +239,18 @@ def main(argv=None) -> int:
     )
     p.add_argument("--max-neighbors", type=int, default=None)
     p.add_argument("--static-obstacles", default="auto", choices=["auto", "on", "off"])
-    p.add_argument("--obstacle-num-rays", type=int, default=60)
-    p.add_argument("--obstacle-max-range", type=float, default=5.0)
+    p.add_argument(
+        "--obstacle-num-rays",
+        type=int,
+        default=None,
+        help="Override env.toml [obstacle_sensor].num_rays",
+    )
+    p.add_argument(
+        "--obstacle-max-range",
+        type=float,
+        default=None,
+        help="Override env.toml [obstacle_sensor].max_range",
+    )
     p.add_argument("--history-steps", type=int, default=8)
     p.add_argument("--max-episode-steps", type=int, default=1500)
     p.add_argument(
@@ -256,25 +268,30 @@ def main(argv=None) -> int:
     device = pick_device(args.device)
     ckpt = resolve_pretrained(args.checkpoint)
     _, info = inspect_checkpoint(ckpt)
+
+    ray_spec = resolve_ray_spec(args.obstacle_num_rays, args.obstacle_max_range)
+
     cfg = resolve_policy_config(
         obstacle_mode=args.obstacle_mode,
         max_neighbors=args.max_neighbors,
-        obstacle_max_range=args.obstacle_max_range,
+        ray_spec=ray_spec,
         checkpoint_info=info,
     )
     policy = build_policy(cfg, device)
-    info = load_policy_checkpoint(policy, ckpt)
-    print(f"loaded: {info.summary()}")
 
     settings = EnvSettings(
         max_neighbors=cfg.max_neighbors,
         history_steps=args.history_steps,
         max_episode_steps=args.max_episode_steps,
         static_obstacles=resolve_static_obstacles(args.static_obstacles, cfg),
-        obstacle_num_rays=args.obstacle_num_rays,
-        obstacle_max_range=cfg.obstacle_max_range,
+        ray_spec=ray_spec,
     )
     env = make_env(settings)
+
+    verify_ray_wiring(env, policy)  # fail here, with component names, not mid-episode
+
+    info = load_policy_checkpoint(policy, ckpt)
+    print(f"loaded: {info.summary()}")
     recorder = VideoRecorder(args.video, args.video_fps) if args.video else None
     live = None
     if args.render:

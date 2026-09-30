@@ -55,12 +55,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 import numpy as np
 from shapely.geometry import LineString
 from shapely.geometry.base import BaseGeometry
+
+from navcore.entities.components.sensors.ray_spec import RaySpec, default_ray_spec
 
 
 class HitType(IntEnum):
@@ -72,31 +74,22 @@ class HitType(IntEnum):
 
 @dataclass(slots=True, frozen=True)
 class ObstacleDetectorConfig:
-    """Ray-casting sensor parameters.
+    """Prefer ObstacleDetectorConfig.from_spec(spec). Defaults come from env.toml."""
 
-    Attributes:
-        num_rays: Number of evenly spaced rays per scan. Defaults to 180
-            to match `RangeImageBuilderConfig`'s default image width --
-            keep the two in sync when either is overridden.
-        max_range: Ray length in meters. A ray that hits nothing reports
-            this as its distance and is marked invalid in `hit_mask` --
-            this is also exactly what `RangeImageBuilder` treats as "the
-            sensing-square boundary itself is the first hit" (see that
-            module's docstring).
-        fov_radians: Angular spread of the ray fan, centered on `heading`.
-            2*pi gives a full 360-degree ring (e.g. a spinning lidar);
-            anything smaller gives a forward-facing cone.
-    """
-
-    num_rays: int = 60
-    max_range: float = 5.0
-    fov_radians: float = 2.0 * math.pi
+    num_rays: int = field(default_factory=lambda: default_ray_spec().num_rays)
+    max_range: float = field(default_factory=lambda: default_ray_spec().max_range)
+    fov_radians: float = field(default_factory=lambda: default_ray_spec().fov_radians)
 
     def __post_init__(self) -> None:
-        if self.num_rays <= 0:
-            raise ValueError(f"num_rays must be positive, got {self.num_rays!r}.")
-        if self.max_range <= 0.0:
-            raise ValueError(f"max_range must be positive, got {self.max_range!r}.")
+        _ = self.spec  # RaySpec validates num_rays / max_range
+
+    @property
+    def spec(self) -> RaySpec:
+        return RaySpec(self.num_rays, self.max_range, self.fov_radians)
+
+    @classmethod
+    def from_spec(cls, spec: RaySpec) -> ObstacleDetectorConfig:
+        return cls(spec.num_rays, spec.max_range, spec.fov_radians)
 
 
 @dataclass(slots=True, frozen=True)

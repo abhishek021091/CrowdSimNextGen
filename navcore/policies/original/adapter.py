@@ -44,7 +44,7 @@ obstacle mode.
 from __future__ import annotations
 
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -52,6 +52,12 @@ from gymnasium import spaces
 from torch import Tensor, nn
 
 from navcore.policies.obstacle_mode import ObstacleMode
+from navcore.entities.components.sensors.ray_spec import (
+    RaySpec,
+    check_ray_counts,
+    default_ray_spec,
+)
+
 
 from .obstacle_tokenizer import ObstacleTokenizer, ObstacleTokenizerConfig
 from .policy import Policy
@@ -115,10 +121,23 @@ class CrowdNavPPPolicyConfig:
     use_gst_prediction: bool = False
     gst_pred_length: int = _PRED_STEPS
     obstacle_mode: ObstacleMode = ObstacleMode.NONE
-    obstacle_max_range: float = 5.0
+    ray_spec: RaySpec = field(
+        default_factory=default_ray_spec
+    )  # replaces obstacle_max_range + obstacle_num_rays
     obstacle_hit_radius: float = 0.3
-    obstacle_num_rays: int = 60
     use_obstacle_encoder: bool | None = None
+
+    @property
+    def obstacle_num_rays(self) -> int:
+        return self.ray_spec.num_rays
+
+    @property
+    def obstacle_max_range(self) -> float:
+        return self.ray_spec.max_range
+
+    @property
+    def num_obstacle_slots(self) -> int:
+        return self.ray_spec.num_rays if self.uses_ray_features else 0
 
     def __post_init__(self) -> None:
         if self.use_obstacle_encoder is not None:
@@ -138,10 +157,6 @@ class CrowdNavPPPolicyConfig:
                 "ObstacleMode.ENCODER was removed from the official-port adapter: "
                 "obstacles are now pseudo-humans (ObstacleMode.POINT_TOKENS)."
             )
-        if self.obstacle_num_rays <= 0:
-            raise ValueError(
-                f"obstacle_num_rays must be positive, got {self.obstacle_num_rays!r}."
-            )
         if self.use_gst_prediction and self.gst_pred_length != _PRED_STEPS:
             raise ValueError(
                 f"The official 12-d spatial edge requires gst_pred_length="
@@ -151,11 +166,6 @@ class CrowdNavPPPolicyConfig:
     @property
     def uses_ray_features(self) -> bool:
         return self.obstacle_mode is not ObstacleMode.NONE
-
-    @property
-    def num_obstacle_slots(self) -> int:
-        """Pseudo-human slots appended after the real humans (0 in NONE mode)."""
-        return self.obstacle_num_rays if self.uses_ray_features else 0
 
     @property
     def total_slots(self) -> int:
@@ -295,8 +305,9 @@ class CrowdNavPPPolicy(Policy):
         if config.obstacle_mode is ObstacleMode.POINT_TOKENS:
             self.obstacle_tokenizer = ObstacleTokenizer(
                 ObstacleTokenizerConfig(
-                    max_range=config.obstacle_max_range,
+                    max_range=config.ray_spec.max_range,
                     hit_radius=config.obstacle_hit_radius,
+                    num_rays=config.ray_spec.num_rays,
                 )
             )
 
@@ -376,11 +387,13 @@ class CrowdNavPPPolicy(Policy):
         together with padded human slots.
         """
         assert self.obstacle_tokenizer is not None
-        if ray_features.shape[1] != self.num_obstacle_slots:
-            raise ValueError(
-                f"ray_features has {ray_features.shape[1]} rays but the policy was "
-                f"built for obstacle_num_rays={self.num_obstacle_slots}."
-            )
+        check_ray_counts(
+            {
+                "CrowdNavPPPolicy.config.ray_spec.num_rays": self.num_obstacle_slots,
+                "observation['ray_features'] (env sensor)": ray_features.shape[1],
+            },
+            context="CrowdNavPPPolicy._obstacle_slots",
+        )
         tokens, hit = self.obstacle_tokenizer.tokenize(ray_features)
         # tokens: (rel_px, rel_py, vx=0, vy=0, radius). Radius is dropped here,
         # like it is for real humans (the official edge has no radius channel).
