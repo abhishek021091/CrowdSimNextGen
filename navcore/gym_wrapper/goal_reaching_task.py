@@ -40,23 +40,25 @@ class GoalReachingTask:
         goal_bonus: float = 10.0,
         step_penalty: float = 0.0,
         progress_weight: float = 2.0,
+        alpha: float = 0.95,
     ) -> None:
+        if not 0.0 <= alpha < 1.0:
+            raise ValueError(f"alpha must be in [0, 1), got {alpha!r}.")
         self.collision_penalty = collision_penalty
         self.out_bound_penalty = out_bound_penalty
         self.goal_bonus = goal_bonus
         self.step_penalty = step_penalty
         self.progress_weight = progress_weight
+        self.alpha = alpha
 
         self._mission = GoalReachingMission()
         self._prev_distance: float | None = None
-
-    @property
-    def mission(self) -> GoalReachingMission:
-        return self._mission
+        self._smoothed_progress: float = 0.0
 
     def reset(self, env: Environment) -> None:
         self._mission = GoalReachingMission()
         self._prev_distance = self._distance_to_goal(env)
+        self._smoothed_progress = 0.0
 
     def reward(self, env: Environment, collided: bool, out_of_bounds: bool) -> float:
         distance = self._distance_to_goal(env)
@@ -64,7 +66,9 @@ class GoalReachingTask:
         progress = self._prev_distance - distance
         self._prev_distance = distance
 
-        reward = self.step_penalty + self.progress_weight * progress
+        self._smoothed_progress = self.alpha * self._smoothed_progress + progress
+
+        reward = self.step_penalty + self.progress_weight * self._smoothed_progress
         if collided:
             reward += self.collision_penalty
         if out_of_bounds:
